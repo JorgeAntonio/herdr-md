@@ -3,7 +3,7 @@
 // never cut a block that can hold a blank line, line numbers must be the file's
 // own, and the chunked tokens must match lexing the whole file at once.
 import assert from "node:assert/strict";
-import { marked, boundaries, splitChunks, capSource, lexAll, blocks, CHUNK, LEX_MAX } from "../mods/herdr-md/lex.js";
+import { marked, boundaries, splitChunks, capSource, lexAll, blocks, statementLines, CHUNK, LEX_MAX } from "../mods/herdr-md/lex.js";
 
 let n = 0;
 const t = (name, f) => { f(); n++; console.log("ok  ", name); };
@@ -212,6 +212,43 @@ t("a table is one block per row: the header with its |---| line, then each row o
   // An empty header isn't shown, so it isn't a stop.
   const noHead = lexAll("|  |  |\n|--|--|\n| 1 | 2 |\n").blocks;
   assert.deepEqual(noHead.map(b => [b.type, b.r, b.from, b.first, b.last]), [["trow", 0, 3, true, true]]);
+});
+
+t("a paragraph of statement lines is one block per source line", () => {
+  const long = "x ".repeat(80).trim();
+  const text = `### DW\nPREMISE:  ${long}\nEVIDENCE: short\nTRACE:    ${long} more\nVERDICT:  PASS\n\n### Next\n`;
+  const bs = lexAll(text).blocks;
+  assert.deepEqual(bs.map(b => [b.type, b.from, b.to, b.first, b.last]), [
+    ["heading", 1, 1, undefined, undefined],
+    ["pline", 2, 2, true, false], ["pline", 3, 3, false, false], ["pline", 4, 4, false, false], ["pline", 5, 5, false, true],
+    ["heading", 7, 7, undefined, undefined]]);
+  assert.ok(bs[1].para === bs[4].para && bs[1].para.type === "paragraph", "lines share the paragraph token");
+  assert.equal(bs[4].text, "VERDICT:  PASS");
+  // Hard breaks, and lines too short to have been wrapped.
+  const types = src => lexAll(src).blocks.map(b => b.type);
+  assert.deepEqual(types("`select(opts)` \\\nSelect the entry under the cursor\n"), ["pline", "pline"]);
+  assert.equal(lexAll("one \\\ntwo\n").blocks[0].text, "one");
+  assert.deepEqual(types("**Version:** 1.0\n**Date:** 2025-11-10\n"), ["pline", "pline"]);
+});
+
+t("hard-wrapped prose stays one paragraph, however ragged", () => {
+  const whole = src => assert.deepEqual(lexAll(src).blocks.map(b => b.type), ["paragraph"], src);
+  whole("Community leaders are responsible for clarifying and enforcing our standards of\nacceptable behavior and will take appropriate and fair corrective action in\nresponse to any behavior that they deem inappropriate, threatening, offensive,\nor harmful.\n");
+  whole("As part of the `core` refactor, `openai/uploads` was moved to `openai/core/uploads`\nand the following exports were removed, as they were not intended to be a part of the public API:\n");
+  // Edited after wrapping: short lines, but they pick up mid-sentence.
+  whole("A general-purpose method for ANY media (video first; also audio, images and text) that is both\nlossy and lossless. Content-specific\nwins are interesting but don't count as general: report results across a diverse set of clips\nand say which content a gain comes from.\n");
+  // One over-long line (a URL, a path) doesn't make wrapped prose a list.
+  whole(`reads stay proportional to the file however many Cluster-looking bytes a forged file holds, see\n${"`codec/tests/mkv.rs`: " + "y ".repeat(90)}and\nthe rest of the sentence carries on here until it ends.\n`);
+});
+
+t("a paragraph whose lines can't stand alone stays whole", () => {
+  const whole = src => assert.deepEqual(lexAll(src).blocks.map(b => b.type), ["paragraph"], src);
+  whole("**Status:** ok\n![shot](a.png)\n");               // an image (zoom, video, only-images)
+  whole("**bold starts\nand ends** here\n");                 // markup across the break
+  whole("Cost: $a +\nb$ dollars\n");                         // inline math across the break
+  whole("Name: x\n:label:`fig_x`\n");                        // a d2l label
+  whole("Count: 1\n2. would be a list alone\n");
+  assert.equal(statementLines(["just one word", "another"]), true);
 });
 
 console.log(`${n} passed`);

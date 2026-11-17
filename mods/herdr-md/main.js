@@ -306,7 +306,7 @@ export default class Md extends View {
       if (l) {
         // A table's label names the whole table: its first row.
         let target = out.length - 1;
-        while (target > 0 && out[target].type === "trow" && !out[target].first) target--;
+        while (target > 0 && (out[target].type === "trow" || out[target].type === "pline") && !out[target].first) target--;
         if (target >= 0) {
           const t = out[target];
           if (l.eq) t.eqNum = ++eq;
@@ -441,10 +441,29 @@ export default class Md extends View {
     this.notes.highlights.forEach((h, k) => {
       let hit = [];
       if (Array.isArray(h.lines)) { const [a, b = a] = h.lines; hit = this.blocks.map((x, i) => x.to >= a && x.from <= b ? i : -1).filter(i => i >= 0); }
-      else if (h.text) { const q = squash(h.text); const i = this.blocks.findIndex(x => squash(x.raw).includes(q)); if (i >= 0) hit = [i]; }
+      else if (h.text) hit = this.findText(squash(h.text));
       h.blocks = hit;
       hit.forEach((i, j) => this.marks.set(i, { ...h, k, last: j === hit.length - 1 }));
     });
+  }
+
+  // The first block holding the phrase `q` (squashed). A paragraph shown line
+  // by line is searched whole, and the lines the phrase touches are the hit.
+  findText(q) {
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (b.type !== "pline") { if (squash(b.raw).includes(q)) return [i]; continue; }
+      if (!b.first) continue;
+      const at = squash(b.para.raw).indexOf(q); if (at < 0) continue;
+      const hit = []; let pos = 0;
+      for (let j = i; j < this.blocks.length && this.blocks[j].para === b.para; j++) {
+        const end = pos + squash(this.blocks[j].raw).length;
+        if (end > at && pos < at + q.length) hit.push(j);
+        pos = end + 1;
+      }
+      return hit;
+    }
+    return [];
   }
 
   // Scroll so block `i` sits a little below the top, unfolding what hides it.
@@ -850,6 +869,9 @@ export default class Md extends View {
           .children(tok.rows.map((_row, r) => this.tableRow(tok, r, id, t).when(r > 0 || hasHeader, el => el.border_t(1).border_color(t.border))
             .when(r % 2 === 1, el => el.bg(t.canvas))));
       }
+      case "pline":
+        // One source line of a paragraph (paraLines in lex.js); row() spaces the ends.
+        return div().py(1).child(this.inline(id, tok.text));
       case "trow":
         // One row of a top-level table; its frame and stripes are drawn by row().
         return this.tableRow(tok.table, tok.r, id, t);
@@ -915,11 +937,12 @@ export default class Md extends View {
     const cp = cur ? cursorParts(this.look, this.resting ? this.cmotion : "steady", this.numbers !== "off") : null;
     const size = this.curSize?.i === i ? this.curSize : null, grows = Boolean(cp?.rowAnim?.startsWith("grow") && size);
     // Line number lined up with the block's first line of text.
-    const fs = tok.type === "heading" ? SIZE[`h${tok.depth}`] : SIZE.body, tr = tok.type === "trow" ? tok : null;
-    const pad = tok.type === "heading" ? (tok.depth <= 2 ? 22 : 14) : { paragraph: 5, listitem: 2, code: 8, table: 8, blockquote: 8, trow: 8 }[tok.type] ?? 4;
+    const fs = tok.type === "heading" ? SIZE[`h${tok.depth}`] : SIZE.body, tr = tok.type === "trow" ? tok : null, pl = tok.type === "pline" ? tok : null;
+    const pad = tok.type === "heading" ? (tok.depth <= 2 ? 22 : 14) : { paragraph: 5, listitem: 2, code: 8, table: 8, blockquote: 8, trow: 8, pline: 1 }[tok.type] ?? 4;
     const numTop = pad + (tok.type === "code" ? 2 : (fs * 1.65 - 19) / 2);
     const changed = this.changed.has(i), gone = this.removed.get(i);
     return v_flex().id(`row-${i}`).relative().when(Boolean(tr?.first), el => el.mt(8)).when(Boolean(tr?.last), el => el.mb(8))
+      .when(Boolean(pl?.first), el => el.mt(4)).when(Boolean(pl?.last), el => el.mb(4))
       .on_mouse_down("left", (_e, cx) => { if (this.zoom) return; this.cursor = i; this.rest(cx); this.handle.focus(); cx.notify(); })
       .when(Boolean(gone), el => el.child(this.removedMark(gone, t)))
       .when(Boolean(picked) && i === this.picked[0] && (!tr || tr.first), el => el.child(h_flex().mb(2).gap(6).items_center().text_size(11).text_color(t.ansi4)
@@ -1264,7 +1287,7 @@ export default class Md extends View {
           const all = blocks(src.text, marked.lexer(src.text)).filter(b => !labelOf(b));
           pv.blocks = all.slice(0, PV_BLOCKS); pv.more = all.length - pv.blocks.length; pv.cut = src.cut; pv.lines = (text.match(/\n/g)?.length ?? 0) + 1;
           // The blocks' own tokens (a list item's list), each made once.
-          const top = [...new Set(pv.blocks.map(b => b.type === "listitem" ? b.list : b.type === "trow" ? b.table : b))];
+          const top = [...new Set(pv.blocks.map(b => b.type === "listitem" ? b.list : b.type === "trow" ? b.table : b.type === "pline" ? b.para : b))];
           marked.walkTokens(top, tok => { tok.pv = true; if (isMath(tok) || isMermaid(tok)) tok.fig = this.figKey(tok); });
           this.prepare(top, pv.codes);
         } catch (e) { pv.blocks = []; pv.error = `couldn't preview: ${String(e).slice(0, 100)}`; }

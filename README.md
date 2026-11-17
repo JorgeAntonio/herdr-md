@@ -184,8 +184,8 @@ mdh video FILE [N] seek 0:12                              # jump; keeps playing 
 ```
 
 Notes are markdown. Colors: yellow (default), green, red, blue, purple, cyan.
-Highlights snap to whole blocks (a paragraph, heading, list item, table row,
-code block). For Claude Code there's a ready skill in
+Highlights snap to whole blocks (a paragraph or one of its statement lines,
+heading, list item, table row, code block). For Claude Code there's a ready skill in
 [`skills/md-viewer/SKILL.md`](skills/md-viewer/SKILL.md): copy it to
 `~/.claude/skills/md-viewer/`.
 
@@ -193,7 +193,7 @@ code block). For Claude Code there's a ready skill in
 
 | Keys | |
 |---|---|
-| `j` `k` (counts: `5j`), `gg` `G` | move the cursor (one block is one line; a table steps row by row) |
+| `j` `k` (counts: `5j`), `gg` `G` | move the cursor (one block is one line; a table steps row by row, and a paragraph of one-statement-per-line text steps line by line) |
 | `ctrl-d` `ctrl-u`, `ctrl-f` `ctrl-b`, `space` | half / full page |
 | `ctrl-e` `ctrl-y` | scroll a line, cursor stays |
 | `{` `}` | previous / next heading |

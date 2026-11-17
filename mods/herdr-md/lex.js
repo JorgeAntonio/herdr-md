@@ -140,6 +140,7 @@ export function blocks(src, tokens, base = 0) {
   for (const tok of tokens) {
     if (tok.type === "list") tok.items.forEach((item, j) => out.push({ type: "listitem", item, list: tok, n: (tok.start || 1) + j, raw: item.raw }));
     else if (tok.type === "table") out.push(...tableRows(tok));
+    else if (tok.type === "paragraph") out.push(...paraLines(tok));
     // Space and comment-only HTML render nothing, so they aren't blocks (no cursor stop).
     // Safe: each block's lines come from finding its raw text, not from counting.
     else if (tok.type !== "space" && !isComment(tok)) out.push(tok);
@@ -174,6 +175,49 @@ export function tableRows(tok) {
   tok.rows.forEach((_row, r) => out.push({ type: "trow", table: tok, r, raw: lines[r + 2] }));
   out.forEach((b, k) => { b.first = k === 0; b.last = k === out.length - 1; });
   return out.length ? out : [tok];
+}
+
+// A paragraph whose source lines are separate statements (PREMISE: … / EVIDENCE: …,
+// one sentence per line) is one block per line, so the cursor steps through it
+// and each line shows its own number. Prose that was hard-wrapped at a column
+// stays one block and reflows. The test is whether the line breaks were forced:
+// wrapped text breaks only where the next word wouldn't fit. A paragraph is
+// split when a line ends in a hard break, when its lines are too long or too
+// short to have been wrapped (WRAP_MAX, WRAP_MIN), or when its breaks left
+// room for the next word: at least half of them by WRAP_SLACK characters
+// (wrapped prose is ragged, and an edited one has a short line or two), or,
+// with only two lines, the first ending before 60% of the second's width.
+// Hand-wrapped prose can be that ragged too, so lines that mostly pick up
+// mid-sentence keep it whole.
+// Each line is drawn as markdown on its own, so anything that can't stand
+// alone keeps the paragraph whole: an image, inline markup or math that
+// crosses a break, a d2l label, or a line that would read as another kind of
+// block.
+export const WRAP_MAX = 140, WRAP_MIN = 50, WRAP_SLACK = 8;
+const hasImage = toks => (toks ?? []).some(x => x.type === "image" || hasImage(x.tokens));
+export function statementLines(lines) {
+  if (lines.slice(0, -1).some(l => /( {2,}|\\)$/.test(l))) return true;
+  const text = lines.map(l => l.trim()), spaced = text.filter(l => /\s/.test(l));
+  if (!spaced.length) return true;
+  const width = Math.max(...spaced.map(l => l.length));
+  if (width < WRAP_MIN) return true;
+  const breaks = text.length - 1, room = k => text[k].length + 1 + text[k + 1].split(/\s/, 1)[0].length;
+  // A line that picks up mid-sentence (lowercase, after no closing punctuation).
+  const carries = k => /^\p{Ll}/u.test(text[k + 1]) && !/[.!?:;]$/.test(text[k]);
+  let unforced = 0, carried = 0;
+  for (let k = 0; k < breaks; k++) { if (room(k) <= width - WRAP_SLACK) unforced++; if (carries(k)) carried++; }
+  if (carried * 2 >= breaks) return false;
+  if (width > WRAP_MAX) return true;
+  return breaks === 1 ? room(0) <= width * 0.6 : unforced * 2 >= breaks;
+}
+export function paraLines(tok) {
+  const lines = tok.raw.replace(/\s+$/, "").split("\n");
+  if (lines.length < 2 || !tok.tokens || hasImage(tok.tokens)) return [tok];
+  if (tok.tokens.some(x => x.type !== "text" && x.type !== "br" && x.raw.includes("\n"))) return [tok];
+  if (lines.some(l => !l.trim() || (l.match(/\$/g)?.length ?? 0) % 2 || /^\s*:(eq)?label:`/.test(l))) return [tok];
+  if (!statementLines(lines)) return [tok];
+  for (const l of lines) { const alone = marked.lexer(l.trim()); if (alone.length !== 1 || alone[0].type !== "paragraph") return [tok]; }
+  return lines.map((l, k) => ({ type: "pline", para: tok, raw: l, text: l.trim().replace(/\s*\\$/, ""), first: k === 0, last: k === lines.length - 1 }));
 }
 
 // The whole text lexed chunk by chunk, at once (tests, and the benchmark).
