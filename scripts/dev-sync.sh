@@ -5,5 +5,5 @@ set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
 dest="${HERDR_APP_HOME:-$HOME/.config/herdr-app}/mods/herdr-md"
 mkdir -p "$dest"
-rsync -a --exclude node_modules --exclude .cache "$here/mods/herdr-md/" "$dest/"
+rsync -a --exclude node_modules --exclude .cache --exclude __pycache__ "$here/mods/herdr-md/" "$dest/"
 herdr-app check "$dest"
