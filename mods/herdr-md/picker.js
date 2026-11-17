@@ -52,7 +52,8 @@ export async function listFiles(exec, dir, { noIgnore = false, depth = FIND_DEPT
       if (r && r.code === 0) return finish(root, "git", [...new Set(r.stdout.split("\0"))].filter(p => p && MD.test(p) && !skipped(p)));
     }
   }
-  const r = await exec("find", [dir, "-maxdepth", String(depth),
+  // -H: follow a symlink given as the root itself (/tmp -> private/tmp), none inside the tree.
+  const r = await exec("find", ["-H", dir, "-maxdepth", String(depth),
     "(", "-name", "node_modules", "-o", "-name", ".git", "-o", "-name", ".cache", "-o", "-name", "Library", "-o", "-name", ".Trash", ")", "-prune",
     "-o", "-type", "f", "(", "-iname", "*.md", "-o", "-iname", "*.markdown", ")", "-print"]).catch(() => ({ stdout: "" }));
   const base = dir.replace(/\/+$/, "");

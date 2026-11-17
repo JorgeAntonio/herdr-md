@@ -2,7 +2,7 @@
 // The picker's Telescope-style options (picker.json), re-rooting into a folder,
 // and the folders-only listing.
 import assert from "node:assert/strict";
-import { parseConfig, layoutOf, sizeOf, within, shape, foldersOf, readmeOf, shorten, PICK_DEFAULTS } from "../mods/herdr-md/picker.js";
+import { listFiles, parseConfig, layoutOf, sizeOf, within, shape, foldersOf, readmeOf, shorten, PICK_DEFAULTS } from "../mods/herdr-md/picker.js";
 
 let n = 0;
 const t = (name, f) => { f(); n++; console.log("ok  ", name); };
@@ -100,5 +100,14 @@ t("shorten cuts folders to a letter", () => {
   assert.equal(shorten(".github/workflows"), ".g/w");
   assert.equal(shorten(""), "");
 });
+
+{ // a folder listing follows a symlinked root (find -H) and lists under the given path
+  const calls = [];
+  const exec = async (c, a) => { calls.push([c, a]); return c === "find" ? { code: 0, stdout: "/tmp/a.md\n/tmp/sub/b.md\n" } : { code: 1, stdout: "" }; };
+  const r = await listFiles(exec, "/tmp");
+  assert.equal(calls.find(([c]) => c === "find")[1][0], "-H");
+  assert.deepEqual(r.files.sort(), ["a.md", "sub/b.md"]);
+  n++; console.log("ok   folder listing uses find -H");
+}
 
 console.log(`${n} passed`);
