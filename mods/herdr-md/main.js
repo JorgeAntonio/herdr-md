@@ -228,17 +228,30 @@ export default class Md extends View {
   async locate(cands) {
     let on = cands[0];
     if (this.file && cands.length > 1) {
-      for (const m of cands) if (await readTextFile(this.file, { on: m }).catch(() => null) !== null) { on = m; break; }
+      // Probe in order and stop at the first hit. A file over 1 MiB can't be read whole but exists.
+      for (const m of cands) if (await readTextFile(this.file, { on: m }).then(t => t !== null, e => /exceeds/i.test(String(e)))) { on = m; break; }
     }
     this.on = on;
-    if (on) { REMOTE_HOME[on] ??= exec("sh", ["-c", 'printf %s "$HOME"'], { on }).then(r => r.stdout.trim()); this.rhome = await REMOTE_HOME[on].catch(() => null); }
+    await this.homeReady();
+  }
+
+  // A remote machine's $HOME, looked up until it succeeds (a failure is never cached).
+  async homeReady() {
+    const on = this.on;
+    if (on && !this.rhome) {
+      REMOTE_HOME[on] ??= exec("sh", ["-c", 'printf %s "$HOME"'], { on }).then(r => r.code === 0 && r.stdout.trim().startsWith("/") ? r.stdout.trim() : null, () => null);
+      this.rhome = await REMOTE_HOME[on];
+      if (!this.rhome) delete REMOTE_HOME[on];
+    }
+    return !on || Boolean(this.rhome);
   }
 
   rd(path) { return readTextFile(path, { on: this.on }); }
   ex(cmd, args) { return exec(cmd, args, { on: this.on }); }
   // Where mdh (on the file's machine) keeps annotations; `~` there.
-  notesDir() { return this.on ? `${this.rhome}/.cache/herdr-md` : NOTES(); }
-  homeDir() { return this.on ? this.rhome : home(); }
+  // Null while a remote $HOME is unknown: callers skip the read or write then.
+  notesDir() { return !this.on ? NOTES() : this.rhome ? `${this.rhome}/.cache/herdr-md` : null; }
+  homeDir() { return this.on ? this.rhome ?? "" : home(); }
   // "mtime:size" of each path on the file's machine (null: missing).
   async stats(paths) {
     const r = await this.ex("sh", ["-c", STAT_SH, "stat", ...paths]).catch(() => null);
@@ -249,18 +262,23 @@ export default class Md extends View {
   // Resolves false when it is missing, over `max` bytes, or the copy fails.
   async fetchRemote(abs, dest, size, max) {
     if (!(size <= max)) return false;
-    const done = await exec("sh", ["-c", ': > "$1.part"', "fetch", dest]);
-    if (done.code !== 0) return false;
-    for (let off = 0; off < size; off += CHUNK) {
-      const r = await this.ex("sh", ["-c", CHUNK_SH, "chunk", abs, String(off), String(CHUNK)]);
-      if (r.code !== 0) return false;
-      for (const part of slices(r.stdout.trim())) {
-        const d = await exec("sh", ["-c", 'printf %s "$1" | base64 -d >> "$2.part"', "decode", part, dest]);
-        if (d.code !== 0) return false;
+    try {
+      if ((await exec("sh", ["-c", ': > "$1.part"', "fetch", dest])).code !== 0) return false;
+      for (let off = 0; off < size; off += CHUNK) {
+        const r = await this.ex("sh", ["-c", CHUNK_SH, "chunk", abs, String(off), String(CHUNK)]);
+        if (r.code !== 0 || !r.stdout.trim()) return this.dropPart(dest);
+        for (const part of slices(r.stdout.trim())) {
+          if ((await exec("sh", ["-c", 'printf %s "$1" | base64 -d >> "$2.part"', "decode", part, dest])).code !== 0) return this.dropPart(dest);
+        }
       }
-    }
-    return (await exec("mv", ["-f", `${dest}.part`, dest])).code === 0;
+      // The copy must be as long as the file was when stat'ed, or it is not a copy.
+      const wc = await exec("wc", ["-c", `${dest}.part`]);
+      if (parseInt(wc.stdout, 10) !== size) return this.dropPart(dest);
+      return (await exec("mv", ["-f", `${dest}.part`, dest])).code === 0;
+    } catch { return this.dropPart(dest); }
   }
+
+  dropPart(dest) { exec("rm", ["-f", `${dest}.part`]).catch(() => {}); return false; }
 
   // Read and lex the file in bounded chunks (lex.js), pausing between them so the
   // pane never blocks. A file not on screen yet shows its first chunk at once;
@@ -345,7 +363,8 @@ export default class Md extends View {
       let last = null;
       while (gen === this.watchGen) {
         if (this.on) {
-          const file = this.file, note = `${this.notesDir()}/${noteKey(file)}`;
+          await this.homeReady();
+          const file = this.file, dir = this.notesDir(), note = dir ? `${dir}/${noteKey(file)}` : file;
           const [f, n] = await this.stats([file, note]);
           if (gen !== this.watchGen) return;
           if (last?.file === file) { if (f !== last.f) this.load(cx); if (n !== last.n) this.readNotes(cx); }
@@ -391,13 +410,14 @@ export default class Md extends View {
   // pane, or in any viewer before: hashes are kept in ~/.cache/herdr-md/seen-*).
   async markChanges() {
     const hashes = this.blocks.map(b => bhash(b.raw.trim()));
-    const seen = `${this.notesDir()}/seen-${noteKey(this.file)}`;
+    await this.homeReady();
+    const nd = this.notesDir(), seen = nd && `${nd}/seen-${noteKey(this.file)}`;
     let prev = this.lastHashes;
-    if (!prev) { try { prev = JSON.parse(await this.rd(seen) ?? "null"); } catch { prev = null; } }
+    if (!prev && seen) { try { prev = JSON.parse(await this.rd(seen) ?? "null"); } catch { prev = null; } }
     const { changed, removed } = diffBlocks(prev ?? [], hashes);
     const fresh = this.lastHashes !== null;
     this.changed = changed; this.removed = removed; this.lastHashes = hashes; this.ci = -1;
-    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$3"', "seen", this.notesDir(), JSON.stringify(hashes), seen]);
+    if (seen) this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$3"', "seen", nd, JSON.stringify(hashes), seen]).catch(() => {});
     // Glide to the first change, unless an agent highlight is taking the view.
     // (aim alone isn't enough: it stays set after any glide until the person scrolls.)
     const busy = this.highlightAimed; this.highlightAimed = false;
@@ -458,7 +478,7 @@ export default class Md extends View {
   watchNotes(cx) {
     cx.spawn(async cx => {
       await this.ready;
-      await this.ex("mkdir", ["-p", this.notesDir()]);
+      if (await this.homeReady()) await this.ex("mkdir", ["-p", this.notesDir()]).catch(() => {});
       await this.readNotes(cx);
       // A remote viewer's notes are polled by watch().
       while (!this.on) {
@@ -471,7 +491,9 @@ export default class Md extends View {
   async readNotes(cx) {
     if (!this.file) return;
     let n = null;
-    try { n = JSON.parse(await this.rd(`${this.notesDir()}/${noteKey(this.file)}`) ?? "null"); } catch {}
+    await this.ready; await this.homeReady();
+    const nd = this.notesDir();
+    if (nd) try { n = JSON.parse(await this.rd(`${nd}/${noteKey(this.file)}`) ?? "null"); } catch {}
     this.notes = n && Array.isArray(n.highlights) ? n : { highlights: [] };
     // A video command (mdh video) has its own seq. One written before this viewer
     // opened is stale and ignored.
@@ -628,7 +650,7 @@ export default class Md extends View {
       if (/^[a-z]+:\/\//i.test(href)) { this.images[href] = { remote: true }; continue; }
       let abs = href.startsWith("/") ? href : `${dirname(this.file)}/${decodeURIComponent(href)}`;
       const ext = (abs.split(".").pop() || "png").toLowerCase();
-      const name = (this.on ? this.on + "_" : "") + abs.replace(/[^a-zA-Z0-9]+/g, "_").slice(-120) + "." + ext;
+      const name = (this.on ? this.on.replace(/[^A-Za-z0-9._-]/g, "_") + "_" : "") + abs.replace(/[^a-zA-Z0-9]+/g, "_").slice(-120) + "." + ext;
       const local = `${appHome()}/${CACHE}/${name}`;
       let ok;
       if (this.on) {   // copied over, unless the cached copy still matches the remote file
@@ -1261,12 +1283,13 @@ export default class Md extends View {
   // Newest first in ~/.cache/herdr-md/recent.json (read by the picker and `mdh pick`).
   async remember(file) {
     if (!file) return;
-    await this.ready;
+    await this.ready; await this.homeReady();
+    const nd = this.notesDir(); if (!nd) return;
     let list = [];
-    try { list = parseRecent(await this.rd(`${this.notesDir()}/recent.json`)); } catch {}
+    try { list = parseRecent(await this.rd(`${nd}/recent.json`)); } catch {}
     if (list[0] === file) return;
     this.recent = pushRecent(list, file);
-    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.recent.$$" && mv -f "$1/.recent.$$" "$1/recent.json"', "recent", this.notesDir(), JSON.stringify(this.recent)]);
+    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.recent.$$" && mv -f "$1/.recent.$$" "$1/recent.json"', "recent", nd, JSON.stringify(this.recent)]).catch(() => {});
   }
 
   openPicker(cx) {
@@ -1283,13 +1306,14 @@ export default class Md extends View {
     this.rerank(cx, false);
     cx.timer.after(16, cx => { this.pickIn = 1; cx.notify(); });
     cx.spawn(async cx => {
+      await this.ready; await this.homeReady();
       const conf = parseConfig(await readTextFile(PICK_CONF()).catch(() => null));
       if (!this.pick) return;
       const was = JSON.stringify([this.popts.no_ignore, this.popts.depth]);
       this.popts = conf.opts; this.pickErr = conf.error; this.pickFolders = !conf.opts.files;
       if (was !== JSON.stringify([conf.opts.no_ignore, conf.opts.depth])) this.pickList = null;
       this.rerank(cx, true);
-      const recent = parseRecent(await this.rd(`${this.notesDir()}/recent.json`).catch(() => null));
+      const nd = this.notesDir(), recent = parseRecent(nd ? await this.rd(`${nd}/recent.json`).catch(() => null) : null);
       // No file behind the picker: its root, else the newest recent file's folder, else home.
       if (!this.file && !this.pickRoot) this.pickRoot = recent[0] ? dirname(recent[0]) : this.homeDir();
       this.recent = recent;
@@ -1301,6 +1325,7 @@ export default class Md extends View {
   // file's tree (git work tree or folder). Stale answers are dropped.
   async relist(cx) {
     const scope = this.pickScope, o = this.popts, seq = this.pickSeq = (this.pickSeq ?? 0) + 1;
+    await this.ready;
     let list = await listFiles((c, a) => this.ex(c, a), scope ?? (this.file ? dirname(this.file) : this.pickRoot), { noIgnore: o.no_ignore, depth: o.depth });
     if (scope) list = within(list, scope);
     if (seq !== this.pickSeq || !this.pick) return;
@@ -1418,7 +1443,7 @@ export default class Md extends View {
   pickSplit(cx) {
     const row = this.pick?.rows[this.pick.sel]; if (!row || row.dir) return;
     this.closePicker(cx);
-    run("pane.split", { direction: "right", mod: MOD, props: this.on ? { file: row.abs, machine: this.on } : { file: row.abs } });
+    run("pane.split", { direction: "right", mod: MOD, props: { file: row.abs, machine: this.on } });
   }
 
   scrollPreview(dy, cx) {
@@ -1697,7 +1722,8 @@ export default class Md extends View {
   share() {
     const sel = this.selection();
     this.picked = this.range();
-    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/selection.json"', "share", this.notesDir(), JSON.stringify({ ...sel, at: new Date().toISOString() })]);
+    const nd = this.notesDir();
+    if (nd) this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/selection.json"', "share", nd, JSON.stringify({ ...sel, at: new Date().toISOString() })]).catch(() => {});
     this.flash = `📌 pinned lines ${sel.lines[0]}–${sel.lines[1]} for Claude · ask it about "this" · Esc unpins`;
   }
 
@@ -1778,7 +1804,7 @@ export default class Md extends View {
       case "escape":
         if (this.anchor !== null) this.anchor = null;
         else if (this.searching) return this.closeSearch(cx);
-        else { this.picked = null; this.ex("rm", ["-f", `${this.notesDir()}/selection.json`]); }
+        else { this.picked = null; const nd = this.notesDir(); if (nd) this.ex("rm", ["-f", `${nd}/selection.json`]).catch(() => {}); }
         return cx.notify();
       case "#": this.numbers = nextNumberMode(this.numbers); this.flash = `line numbers: ${this.numbers}`; return cx.notify();
       case "C": this.look = nextLook(this.look); this.flash = `cursor: ${LOOK_NAMES[this.look]} · C next look · B motion`; this.saveCursor(); return cx.notify();
