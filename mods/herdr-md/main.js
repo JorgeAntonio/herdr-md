@@ -251,6 +251,8 @@ export default class Md extends View {
   // Where mdh (on the file's machine) keeps annotations; `~` there.
   // Null while a remote $HOME is unknown: callers skip the read or write then.
   notesDir() { return !this.on ? NOTES() : this.rhome ? `${this.rhome}/.cache/herdr-md` : null; }
+  // Shorten the home folder to ~ (not while a remote home is unknown).
+  tilde(p) { const h = this.homeDir(); return h ? p.replace(h, "~") : p; }
   homeDir() { return this.on ? this.rhome ?? "" : home(); }
   // "mtime:size" of each path on the file's machine (null: missing).
   async stats(paths) {
@@ -1315,7 +1317,7 @@ export default class Md extends View {
       this.rerank(cx, true);
       const nd = this.notesDir(), recent = parseRecent(nd ? await this.rd(`${nd}/recent.json`).catch(() => null) : null);
       // No file behind the picker: its root, else the newest recent file's folder, else home.
-      if (!this.file && !this.pickRoot) this.pickRoot = recent[0] ? dirname(recent[0]) : this.homeDir();
+      if (!this.file && !this.pickRoot) this.pickRoot = recent[0] ? dirname(recent[0]) : this.homeDir() || null;
       this.recent = recent;
       await this.relist(cx);
     });
@@ -1326,7 +1328,9 @@ export default class Md extends View {
   async relist(cx) {
     const scope = this.pickScope, o = this.popts, seq = this.pickSeq = (this.pickSeq ?? 0) + 1;
     await this.ready;
-    let list = await listFiles((c, a) => this.ex(c, a), scope ?? (this.file ? dirname(this.file) : this.pickRoot), { noIgnore: o.no_ignore, depth: o.depth });
+    const dir = scope ?? (this.file ? dirname(this.file) : this.pickRoot);
+    if (!dir) return;   // no root yet (a remote home still unknown): nothing to list
+    let list = await listFiles((c, a) => this.ex(c, a), dir, { noIgnore: o.no_ignore, depth: o.depth });
     if (scope) list = within(list, scope);
     if (seq !== this.pickSeq || !this.pick) return;
     this.pickList = list;
@@ -1348,7 +1352,7 @@ export default class Md extends View {
   // Up a folder, but not past home (listing / would search the whole disk).
   pickUp(cx) {
     const root = this.pickList?.root ?? this.pickScope; if (!root) return;
-    if (root === this.homeDir() || dirname(root) === "/") { this.pickNote = `already at the top (${root.replace(this.homeDir(), "~")})`; cx.notify(); return; }
+    if ((this.homeDir() && root === this.homeDir()) || dirname(root) === "/") { this.pickNote = `already at the top (${this.tilde(root)})`; cx.notify(); return; }
     this.pickNote = null;
     this.reroot(dirname(root), this.pickFolders, cx);
   }
@@ -1513,7 +1517,7 @@ export default class Md extends View {
     // A capped listing: files count the first MAX_FILES; folders come from those files.
     const count = !view ? "" : view.folders ? `${n} folder${n === 1 ? "" : "s"}${view.capped ? ` (in the first ${view.files.length} of ${view.total} files)` : ""}`
       : view.capped ? `first ${n} of ${view.total} files` : `${n} file${n === 1 ? "" : "s"}`;
-    const where = view ? `${view.kind === "git" ? "git" : "folder"} · ${view.root.replace(this.homeDir(), "~")} · ${count}` : "listing…";
+    const where = view ? `${view.kind === "git" ? "git" : "folder"} · ${this.tilde(view.root)} · ${count}` : "listing…";
     // The key hints; a box without a preview has room only for the main ones.
     const hint = center || !showPv ? `↵ ${folders ? "enter" : "open"} · ctrl-f ${folders ? "files" : "folders"} · ctrl-g up · Esc`
       : `↵ ${folders ? "enter" : "open"} · ctrl-f ${folders ? "files" : "folders"} · ctrl-g up${folders ? "" : " · ctrl-v split"} · ctrl-n/p move${showPv ? " · ctrl-d/u preview" : ""} · Esc close`;
@@ -1552,7 +1556,7 @@ export default class Md extends View {
 
   previewPane(t, w) {
     const pv = this.pv, p = this.pick, pad = 26;
-    const head = pv ? pv.abs.replace(this.homeDir(), "~") : "";
+    const head = pv ? this.tilde(pv.abs) : "";
     let body = [];
     if (pv && !pv.error) {
       // block() draws the preview's tokens with the viewer's own renderer; the
@@ -1878,13 +1882,13 @@ export default class Md extends View {
       .child(h_flex().gap(10).items_center().text_size(SIZE.body).text_color(t.muted)
         .child(div().child("Find a markdown file")).child(div().text_color(t.dim).child("·")).child(chip("ctrl-p")))
       .child(h_flex().gap(6).items_center().text_size(12).text_color(t.dim)
-        .when(Boolean(this.pickRoot), el => el.child(div().child(`in ${this.pickRoot.replace(this.homeDir(), "~")}`)).child(div().child("·")))
+        .when(Boolean(this.pickRoot), el => el.child(div().child(`in ${this.tilde(this.pickRoot)}`)).child(div().child("·")))
         .child(chip("q")).child(div().child("close")));
   }
 
   // Top: where you are. The file (home shortened), and a crumb back after a link.
   headerBar(t) {
-    const path = (this.file ?? "").replace(this.homeDir(), "~"), name = path.split("/").pop(), dir = path.slice(0, path.length - name.length);
+    const path = this.tilde((this.file ?? "")), name = path.split("/").pop(), dir = path.slice(0, path.length - name.length);
     const prev = this.history.length ? this.history[this.history.length - 1].file.split("/").pop() : null;
     return h_flex().h(30).flex_none().px(14).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
       .when(Boolean(prev), el => el.child(div().id("md-back").px(6).rounded(4).cursor_pointer().text_color(t.accent).hover(s => s.bg(t.hover))
