@@ -27,6 +27,42 @@ import argparse, json, os, re, subprocess, sys, time
 DIR = os.path.expanduser("~/.cache/herdr-md")
 
 
+def find_pane(ls, terminal):
+    """Pane id of `terminal` (an $HC_TERMINAL_ID) in `herdr-app ls` JSON, or None.
+    Remote entries read `ska/t19`, so an exact id wins over a `/`-suffix match; a
+    sub-agent terminal resolves to its parent's pane."""
+    if not terminal:
+        return None
+    found = {}
+    for space in ls.get("spaces", []):
+        for tab in space.get("tabs", []):
+            for t in tab.get("terminals", []):
+                for tid in [t.get("terminal")] + [s.get("terminal") if isinstance(s, dict) else s for s in t.get("sub_agents") or []]:
+                    if isinstance(tid, str) and t.get("pane"):
+                        found.setdefault(tid, t["pane"])
+    if terminal in found:
+        return found[terminal]
+    return next((p for tid, p in found.items() if tid.endswith("/" + terminal)), None)
+
+
+def own_pane():
+    """The pane this shell runs in, so a viewer opens beside it and not beside whatever
+    space the person has focused. None (focused pane) if unknown; never raises."""
+    try:
+        r = subprocess.run(["herdr-app", "ls"], capture_output=True, text=True, timeout=10)
+        return find_pane(json.loads(r.stdout), os.environ.get("HC_TERMINAL_ID")) if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def split_args(direction, props):
+    args = {"direction": direction, "mod": "herdr-md", "props": props}
+    pane = own_pane()
+    if pane:
+        args["pane"] = str(pane)
+    return args
+
+
 def key(path):
     return os.path.join(DIR, re.sub(r"[^a-zA-Z0-9]+", "_", path) + ".json")
 
@@ -79,7 +115,7 @@ def main():
                 cwd = pwd   # keep the person's spelling (symlinks)
         except OSError:
             pass
-        args = {"direction": "right", "mod": "herdr-md", "props": {"pick": True, "dir": cwd}}
+        args = split_args("right", {"pick": True, "dir": cwd})
         r = subprocess.run(["herdr-app", "do", "pane.split", json.dumps(args)], capture_output=True, text=True)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)
     if a.cmd == "sel":
@@ -94,7 +130,7 @@ def main():
     if a.cmd == "open":
         if not os.path.isfile(path):
             sys.exit(f"mdh: no such file: {path}")
-        args = {"direction": "down" if a.down else "right", "mod": "herdr-md", "props": {"file": path}}
+        args = split_args("down" if a.down else "right", {"file": path})
         r = subprocess.run(["herdr-app", "do", "pane.split", json.dumps(args)], capture_output=True, text=True)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)
 
