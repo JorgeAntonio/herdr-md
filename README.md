@@ -57,6 +57,13 @@ figures show their source. Videos need `ffmpeg` (Homebrew's is found).
 Built and tested on macOS; image sizing (`sips`) and
 copy (`pbcopy`) are macOS tools.
 
+**Remote machines:** a viewer in a space on another machine (`hc machine`) reads that
+machine's files: the tab it opened from names the machine (a badge in the header), or
+pass `props.machine`. The document, notes, picker and recent list live there; run `mdh`
+on that machine where Herdr is the window showing it. Herdr can't watch a remote
+folder, so the viewer polls every 1.5 s. Images and videos are copied over (images up
+to 20 MB, videos up to 32 MB) into `.cache/`.
+
 **What it runs:** `node`/`npm` (renderers), `ffmpeg`/`ffprobe` (video frames), `cp`, `mkdir`, `sips`, `pbcopy`. It
 reads the file you open and the images it links, writes only inside its own
 folder (`.cache/`) and `~/.cache/herdr-md/` (highlights and your selection),

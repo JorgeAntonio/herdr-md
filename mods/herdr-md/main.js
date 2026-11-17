@@ -7,14 +7,21 @@
 // ~/.cache/herdr-md/<file-key>.json = { seq, focus, highlights: [{lines:[a,b]} | {text}, note?, color?] }.
 // The viewer watches that folder, tints the matching blocks, shows notes under
 // them and scrolls to `focus` whenever `seq` changes.
+//
+// A viewer in a remote space (hc machine) reads that machine's files: `this.on` is
+// the machine (null: this Mac), and file reads, execs, the notes folder and the
+// picker all go there (props().machine names it; else the tab it opened from).
+// Herdr can't watch a remote folder, so a remote viewer polls stat; images and
+// videos are copied here (base64 over exec) because the app only draws local files.
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, InputState, Input } from "gpui-base";
-import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, focused, run } from "herdr";
+import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, spaces, focused, run } from "herdr";
 import { marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX } from "./lex.js";
 import { inlineMath } from "./tex.js";
 import { hash as bhash, diffBlocks, slug, labelOf, inlineRoles, alertOf, ALERTS, nextNumberMode, ordinals, gutterLabel, nextLook, nextMotion, parseCursorPref, cursorParts, LOOK_NAMES } from "./doc.js";
 import { listFiles, parseRecent, pushRecent, rank, runs, previewSource, parseConfig, layoutOf, sizeOf, within, shape, shorten } from "./picker.js";
 import { VIDEO_FPS, stopped, command, tick } from "./video.js";
+import { machineCandidates, STAT_SH, parseStats, CHUNK, CHUNK_SH, slices } from "./remote.js";
 
 // Figures (display math, Mermaid) are rendered by render/render.mjs into
 // .cache/r/<hash>.{svg,png}; the hash covers the source and the colors used.
@@ -84,12 +91,14 @@ const MODIFIER_KEYS = ["shift", "control", "alt", "platform", "function", "capsl
 // The app only loads images from its own folder, so local images are copied
 // here first. Hidden folder: saving into it doesn't hot-reload the mod.
 const CACHE = `mods/${MOD}/.cache`;
+const REMOTE_POLL = 1500;   // ms between stats of a remote file
+const REMOTE_HOME = {};   // machine -> promise of its $HOME
+const REMOTE_IMG_MAX = 20 << 20, REMOTE_VIDEO_MAX = 32 << 20;
 const NOTES = () => `${home()}/.cache/herdr-md`;
 const noteKey = file => file.replace(/[^a-zA-Z0-9]+/g, "_") + ".json";
 // The ctrl-p picker: recently opened files (newest first), its row height, how
 // many blocks a preview renders, and how long the selection must rest before
 // a file is read for the preview (so holding ctrl-n never waits on disk).
-const RECENT = () => `${NOTES()}/recent.json`;
 const CURSOR_PREF = () => `${NOTES()}/cursor.json`;
 // The picker's options, Telescope-style (see picker.js PICK_DEFAULTS), read each time it opens.
 const PICK_CONF = () => `${home()}/.config/herdr-md/picker.json`;
@@ -181,6 +190,11 @@ export default class Md extends View {
     this.pickRoot = this.file ? null : (props()?.dir || null);
     if (!this.file && !this.pickRoot) { const f = focused(); if (f?.terminal && f.cwd) this.pickRoot = f.cwd; }
     if (!this.file && props()?.pick) cx.timer.after(30, cx => { this.openPicker(cx); cx.notify(); });
+    // Where this viewer's files live. The focused tab is read now: it is the pane this
+    // one split from (the new pane takes focus right after). load() and the picker wait on it.
+    this.on = null; this.rhome = null;
+    const p = props(), explicit = p && "machine" in p ? p.machine : undefined;
+    this.ready = this.locate(machineCandidates({ explicit, focusedTab: focused()?.tab, spaces: spaces(), panes: panes(), mod: MOD }));
     this.remember(this.file);
     readTextFile(CURSOR_PREF()).catch(() => null).then(text => { const p = parseCursorPref(text); this.look = p.look; this.cmotion = p.motion; cx.notify(); });
     this.load(cx);
@@ -209,6 +223,45 @@ export default class Md extends View {
     });
   }
 
+  // The machine the file is on: the first candidate that has it (all but the first only
+  // matter for a restored layout), else the best guess. A remote one needs its $HOME for notes.
+  async locate(cands) {
+    let on = cands[0];
+    if (this.file && cands.length > 1) {
+      for (const m of cands) if (await readTextFile(this.file, { on: m }).catch(() => null) !== null) { on = m; break; }
+    }
+    this.on = on;
+    if (on) { REMOTE_HOME[on] ??= exec("sh", ["-c", 'printf %s "$HOME"'], { on }).then(r => r.stdout.trim()); this.rhome = await REMOTE_HOME[on].catch(() => null); }
+  }
+
+  rd(path) { return readTextFile(path, { on: this.on }); }
+  ex(cmd, args) { return exec(cmd, args, { on: this.on }); }
+  // Where mdh (on the file's machine) keeps annotations; `~` there.
+  notesDir() { return this.on ? `${this.rhome}/.cache/herdr-md` : NOTES(); }
+  homeDir() { return this.on ? this.rhome : home(); }
+  // "mtime:size" of each path on the file's machine (null: missing).
+  async stats(paths) {
+    const r = await this.ex("sh", ["-c", STAT_SH, "stat", ...paths]).catch(() => null);
+    return r?.code === 0 ? parseStats(r.stdout) : paths.map(() => null);
+  }
+
+  // Copy a remote file here, exactly: the remote side prints base64, this side decodes it.
+  // Resolves false when it is missing, over `max` bytes, or the copy fails.
+  async fetchRemote(abs, dest, size, max) {
+    if (!(size <= max)) return false;
+    const done = await exec("sh", ["-c", ': > "$1.part"', "fetch", dest]);
+    if (done.code !== 0) return false;
+    for (let off = 0; off < size; off += CHUNK) {
+      const r = await this.ex("sh", ["-c", CHUNK_SH, "chunk", abs, String(off), String(CHUNK)]);
+      if (r.code !== 0) return false;
+      for (const part of slices(r.stdout.trim())) {
+        const d = await exec("sh", ["-c", 'printf %s "$1" | base64 -d >> "$2.part"', "decode", part, dest]);
+        if (d.code !== 0) return false;
+      }
+    }
+    return (await exec("mv", ["-f", `${dest}.part`, dest])).code === 0;
+  }
+
   // Read and lex the file in bounded chunks (lex.js), pausing between them so the
   // pane never blocks. A file not on screen yet shows its first chunk at once;
   // a reload swaps the whole document in when it's done. Everything that needs
@@ -223,17 +276,18 @@ export default class Md extends View {
     cx.spawn(async cx => {
       try {
         let text = null, cap = null;
-        try { text = await readTextFile(file); }
+        await this.ready;
+        try { text = await this.rd(file); }
         catch (e) {
           // Herdr won't read a text file over 1 MiB: read its start instead.
           if (!/exceeds/i.test(String(e))) throw e;
-          const [head, wc] = await Promise.all([exec("head", ["-c", String(LEX_MAX + 4096), file]), exec("wc", ["-l", file])]);
+          const [head, wc] = await Promise.all([this.ex("head", ["-c", String(LEX_MAX + 4096), file]), this.ex("wc", ["-l", file])]);
           if (head.code !== 0) throw e;
           text = head.stdout;
           cap = { ...capSource(text, Math.min(LEX_MAX, text.length - 4096)), total: parseInt(wc.stdout, 10) || 0 };
         }
         if (stale()) return;
-        if (text === null) { this.error = "File not found"; return cx.notify(); }
+        if (text === null) { this.error = this.on ? `File not found on ${this.on}` : "File not found"; return cx.notify(); }
         cap ??= capSource(text);
         const chunks = splitChunks(cap.text);
         const links = chunks.length > 1 ? refDefs(cap.text) : null;
@@ -281,12 +335,24 @@ export default class Md extends View {
     this.resolve();
   }
 
-  // Reload when the file changes on disk.
+  // Reload when the file changes on disk. Herdr can't watch another machine's
+  // folder, so a remote file (and its notes) is polled with stat instead.
   watch(cx) {
     if (!this.file) return;
     const gen = ++this.watchGen, dir = dirname(this.file);
     cx.spawn(async cx => {
+      await this.ready;
+      let last = null;
       while (gen === this.watchGen) {
+        if (this.on) {
+          const file = this.file, note = `${this.notesDir()}/${noteKey(file)}`;
+          const [f, n] = await this.stats([file, note]);
+          if (gen !== this.watchGen) return;
+          if (last?.file === file) { if (f !== last.f) this.load(cx); if (n !== last.n) this.readNotes(cx); }
+          last = { file, f, n };
+          await cx.sleep(f === null && n === null ? REMOTE_POLL * 4 : REMOTE_POLL);
+          continue;
+        }
         const changed = await watchFolder(dir);
         if (gen !== this.watchGen) return;   // navigated to another file
         // Match by name: the watcher reports resolved paths (/private/tmp/… for
@@ -325,13 +391,13 @@ export default class Md extends View {
   // pane, or in any viewer before: hashes are kept in ~/.cache/herdr-md/seen-*).
   async markChanges() {
     const hashes = this.blocks.map(b => bhash(b.raw.trim()));
-    const seen = `${NOTES()}/seen-${noteKey(this.file)}`;
+    const seen = `${this.notesDir()}/seen-${noteKey(this.file)}`;
     let prev = this.lastHashes;
-    if (!prev) { try { prev = JSON.parse(await readTextFile(seen) ?? "null"); } catch { prev = null; } }
+    if (!prev) { try { prev = JSON.parse(await this.rd(seen) ?? "null"); } catch { prev = null; } }
     const { changed, removed } = diffBlocks(prev ?? [], hashes);
     const fresh = this.lastHashes !== null;
     this.changed = changed; this.removed = removed; this.lastHashes = hashes; this.ci = -1;
-    exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$3"', "seen", NOTES(), JSON.stringify(hashes), seen]);
+    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$3"', "seen", this.notesDir(), JSON.stringify(hashes), seen]);
     // Glide to the first change, unless an agent highlight is taking the view.
     // (aim alone isn't enough: it stays set after any glide until the person scrolls.)
     const busy = this.highlightAimed; this.highlightAimed = false;
@@ -368,6 +434,7 @@ export default class Md extends View {
     const [path, frag = null] = url.replace(/^file:\/\//, "").split("#");
     const abs = path.startsWith("/") ? path : `${dirname(this.file)}/${decodeURIComponent(path)}`.replace(/\/\.\//g, "/");
     if (/\.(md|markdown|mdx)$/i.test(abs)) this.navigate(abs, frag, cx, true);
+    else if (this.on) { this.flash = `${abs.split("/").pop()} is on ${this.on}: can't show it in Finder`; cx.notify(); }
     else { exec("open", ["-R", abs]); this.flash = "shown in Finder"; cx.notify(); }
   }
 
@@ -390,10 +457,13 @@ export default class Md extends View {
   // Runs for an empty viewer too: it starts reading notes once a file is picked.
   watchNotes(cx) {
     cx.spawn(async cx => {
-      await exec("mkdir", ["-p", NOTES()]);
-      for (;;) {
+      await this.ready;
+      await this.ex("mkdir", ["-p", this.notesDir()]);
+      await this.readNotes(cx);
+      // A remote viewer's notes are polled by watch().
+      while (!this.on) {
+        await watchFolder(this.notesDir());
         await this.readNotes(cx);
-        await watchFolder(NOTES());
       }
     });
   }
@@ -401,7 +471,7 @@ export default class Md extends View {
   async readNotes(cx) {
     if (!this.file) return;
     let n = null;
-    try { n = JSON.parse(await readTextFile(`${NOTES()}/${noteKey(this.file)}`) ?? "null"); } catch {}
+    try { n = JSON.parse(await this.rd(`${this.notesDir()}/${noteKey(this.file)}`) ?? "null"); } catch {}
     this.notes = n && Array.isArray(n.highlights) ? n : { highlights: [] };
     // A video command (mdh video) has its own seq. One written before this viewer
     // opened is stale and ignored.
@@ -556,11 +626,19 @@ export default class Md extends View {
     await exec("mkdir", ["-p", `${appHome()}/${CACHE}`]);
     for (const href of [...new Set(srcs)]) {
       if (/^[a-z]+:\/\//i.test(href)) { this.images[href] = { remote: true }; continue; }
-      const abs = href.startsWith("/") ? href : `${dirname(this.file)}/${decodeURIComponent(href)}`;
+      let abs = href.startsWith("/") ? href : `${dirname(this.file)}/${decodeURIComponent(href)}`;
       const ext = (abs.split(".").pop() || "png").toLowerCase();
-      const name = abs.replace(/[^a-zA-Z0-9]+/g, "_").slice(-120) + "." + ext;
-      const cp = await exec("cp", ["-p", abs, `${appHome()}/${CACHE}/${name}`]);
-      if (cp.code !== 0) { this.images[href] = { missing: true }; continue; }
+      const name = (this.on ? this.on + "_" : "") + abs.replace(/[^a-zA-Z0-9]+/g, "_").slice(-120) + "." + ext;
+      const local = `${appHome()}/${CACHE}/${name}`;
+      let ok;
+      if (this.on) {   // copied over, unless the cached copy still matches the remote file
+        const [sig] = await this.stats([abs]), meta = `${local}.sig`;
+        const have = sig && await readTextFile(meta).catch(() => null) === sig && (await exec("test", ["-f", local])).code === 0;
+        ok = Boolean(have) || (sig !== null && await this.fetchRemote(abs, local, Number(sig.split(":")[1]), REMOTE_IMG_MAX)
+          && (await exec("sh", ["-c", 'printf %s "$1" > "$2"', "sig", sig, meta])).code === 0);
+        abs = local;
+      } else ok = (await exec("cp", ["-p", abs, local])).code === 0;
+      if (!ok) { this.images[href] = { missing: true }; continue; }
       let w = 800, h = 450;
       const s = await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", abs]);
       const mw = s.stdout.match(/pixelWidth: (\d+)/), mh = s.stdout.match(/pixelHeight: (\d+)/);
@@ -585,10 +663,28 @@ export default class Md extends View {
     for (const href of this.videoList) {
       const v = this.videos[href] ??= {};
       if (/^[a-z][a-z0-9+.-]*:/i.test(href)) { v.remote = true; continue; }
-      v.abs = href.startsWith("/") ? href : `${dirname(this.file)}/${decodeURIComponent(href)}`;
-      const st = await exec("stat", ["-f", "%m:%z", v.abs]);
-      if (st.code !== 0) { v.missing = true; continue; }
-      const key = fnv(v.abs + st.stdout.trim()), dir = `${CACHE}/v/${key}`;
+      const src = href.startsWith("/") ? href : `${dirname(this.file)}/${decodeURIComponent(href)}`;
+      let sig;
+      if (this.on) {
+        // ffmpeg runs here, so a remote clip is copied first (once per mtime+size).
+        [sig] = await this.stats([src]);
+        if (!sig) { v.missing = true; continue; }
+        const local = `${appHome()}/${CACHE}/rv/${fnv(this.on + src + sig)}.${(src.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+        if ((await exec("test", ["-f", local])).code !== 0) {
+          v.note = "copying from " + this.on + "…"; cx.notify();
+          await exec("mkdir", ["-p", dirname(local)]);
+          const got = await this.fetchRemote(src, local, Number(sig.split(":")[1]), REMOTE_VIDEO_MAX);
+          v.note = null;
+          if (!got) { v.error = `couldn't copy it from ${this.on} (over ${REMOTE_VIDEO_MAX >> 20} MB, or the copy failed)`; cx.notify(); continue; }
+        }
+        v.abs = local;
+      } else {
+        v.abs = src;
+        const st = await exec("stat", ["-f", "%m:%z", v.abs]);
+        if (st.code !== 0) { v.missing = true; continue; }
+        sig = st.stdout.trim();
+      }
+      const key = fnv(v.abs + sig), dir = `${CACHE}/v/${key}`;
       if (v.dir === dir && v.meta) continue;
       v.dir = dir; v.absDir = `${appHome()}/${dir}`; v.meta = null; v.st = stopped(); v.missing = false; v.error = null; v.extracting = null; cx.notify();
       let meta = null;
@@ -693,7 +789,7 @@ export default class Md extends View {
 
   videoBlock(tok, t) {
     const v = this.videos[tok.href];
-    const note = v?.remote ? "remote video not fetched" : v?.missing ? "not found" : v?.error ? `couldn't prepare: ${v.error}` : "preparing frames…";
+    const note = v?.remote ? "remote video not fetched" : v?.note ? v.note : v?.missing ? "not found" : v?.error ? `couldn't prepare: ${v.error}` : "preparing frames…";
     if (!v?.entity || !v.meta) return div().my(6).px(12).py(8).rounded(6).bg(t.surface).text_color(v?.error ? t.blocked : t.dim).text_size(13)
       .child(`▶  ${tok.text || tok.href} · ${note}`);
     const n = this.videoList.indexOf(tok.href);
@@ -1165,11 +1261,12 @@ export default class Md extends View {
   // Newest first in ~/.cache/herdr-md/recent.json (read by the picker and `mdh pick`).
   async remember(file) {
     if (!file) return;
+    await this.ready;
     let list = [];
-    try { list = parseRecent(await readTextFile(RECENT())); } catch {}
+    try { list = parseRecent(await this.rd(`${this.notesDir()}/recent.json`)); } catch {}
     if (list[0] === file) return;
     this.recent = pushRecent(list, file);
-    exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.recent.$$" && mv -f "$1/.recent.$$" "$1/recent.json"', "recent", NOTES(), JSON.stringify(this.recent)]);
+    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.recent.$$" && mv -f "$1/.recent.$$" "$1/recent.json"', "recent", this.notesDir(), JSON.stringify(this.recent)]);
   }
 
   openPicker(cx) {
@@ -1192,9 +1289,9 @@ export default class Md extends View {
       this.popts = conf.opts; this.pickErr = conf.error; this.pickFolders = !conf.opts.files;
       if (was !== JSON.stringify([conf.opts.no_ignore, conf.opts.depth])) this.pickList = null;
       this.rerank(cx, true);
-      const recent = parseRecent(await readTextFile(RECENT()).catch(() => null));
+      const recent = parseRecent(await this.rd(`${this.notesDir()}/recent.json`).catch(() => null));
       // No file behind the picker: its root, else the newest recent file's folder, else home.
-      if (!this.file && !this.pickRoot) this.pickRoot = recent[0] ? dirname(recent[0]) : home();
+      if (!this.file && !this.pickRoot) this.pickRoot = recent[0] ? dirname(recent[0]) : this.homeDir();
       this.recent = recent;
       await this.relist(cx);
     });
@@ -1204,7 +1301,7 @@ export default class Md extends View {
   // file's tree (git work tree or folder). Stale answers are dropped.
   async relist(cx) {
     const scope = this.pickScope, o = this.popts, seq = this.pickSeq = (this.pickSeq ?? 0) + 1;
-    let list = await listFiles(exec, scope ?? (this.file ? dirname(this.file) : this.pickRoot), { noIgnore: o.no_ignore, depth: o.depth });
+    let list = await listFiles((c, a) => this.ex(c, a), scope ?? (this.file ? dirname(this.file) : this.pickRoot), { noIgnore: o.no_ignore, depth: o.depth });
     if (scope) list = within(list, scope);
     if (seq !== this.pickSeq || !this.pick) return;
     this.pickList = list;
@@ -1226,7 +1323,7 @@ export default class Md extends View {
   // Up a folder, but not past home (listing / would search the whole disk).
   pickUp(cx) {
     const root = this.pickList?.root ?? this.pickScope; if (!root) return;
-    if (root === home() || dirname(root) === "/") { this.pickNote = `already at the top (${root.replace(home(), "~")})`; cx.notify(); return; }
+    if (root === this.homeDir() || dirname(root) === "/") { this.pickNote = `already at the top (${root.replace(this.homeDir(), "~")})`; cx.notify(); return; }
     this.pickNote = null;
     this.reroot(dirname(root), this.pickFolders, cx);
   }
@@ -1278,7 +1375,7 @@ export default class Md extends View {
       if (seq !== this.pvSeq) return;
       cx.spawn(async cx => {
         let text = null, error = null;
-        try { text = await readTextFile(abs); } catch (e) { error = String(e).slice(0, 120); }
+        try { text = await this.rd(abs); } catch (e) { error = String(e).slice(0, 120); }
         if (seq !== this.pvSeq || !this.pick) return;
         const pv = { abs, blocks: [], codes: [], lines: 0, more: 0, error: error ?? (text === null ? "not found" : null) };
         if (text !== null) try {
@@ -1321,7 +1418,7 @@ export default class Md extends View {
   pickSplit(cx) {
     const row = this.pick?.rows[this.pick.sel]; if (!row || row.dir) return;
     this.closePicker(cx);
-    run("pane.split", { direction: "right", mod: MOD, props: { file: row.abs } });
+    run("pane.split", { direction: "right", mod: MOD, props: this.on ? { file: row.abs, machine: this.on } : { file: row.abs } });
   }
 
   scrollPreview(dy, cx) {
@@ -1391,7 +1488,7 @@ export default class Md extends View {
     // A capped listing: files count the first MAX_FILES; folders come from those files.
     const count = !view ? "" : view.folders ? `${n} folder${n === 1 ? "" : "s"}${view.capped ? ` (in the first ${view.files.length} of ${view.total} files)` : ""}`
       : view.capped ? `first ${n} of ${view.total} files` : `${n} file${n === 1 ? "" : "s"}`;
-    const where = view ? `${view.kind === "git" ? "git" : "folder"} · ${view.root.replace(home(), "~")} · ${count}` : "listing…";
+    const where = view ? `${view.kind === "git" ? "git" : "folder"} · ${view.root.replace(this.homeDir(), "~")} · ${count}` : "listing…";
     // The key hints; a box without a preview has room only for the main ones.
     const hint = center || !showPv ? `↵ ${folders ? "enter" : "open"} · ctrl-f ${folders ? "files" : "folders"} · ctrl-g up · Esc`
       : `↵ ${folders ? "enter" : "open"} · ctrl-f ${folders ? "files" : "folders"} · ctrl-g up${folders ? "" : " · ctrl-v split"} · ctrl-n/p move${showPv ? " · ctrl-d/u preview" : ""} · Esc close`;
@@ -1430,7 +1527,7 @@ export default class Md extends View {
 
   previewPane(t, w) {
     const pv = this.pv, p = this.pick, pad = 26;
-    const head = pv ? pv.abs.replace(home(), "~") : "";
+    const head = pv ? pv.abs.replace(this.homeDir(), "~") : "";
     let body = [];
     if (pv && !pv.error) {
       // block() draws the preview's tokens with the viewer's own renderer; the
@@ -1600,7 +1697,7 @@ export default class Md extends View {
   share() {
     const sel = this.selection();
     this.picked = this.range();
-    exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/selection.json"', "share", NOTES(), JSON.stringify({ ...sel, at: new Date().toISOString() })]);
+    this.ex("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/selection.json"', "share", this.notesDir(), JSON.stringify({ ...sel, at: new Date().toISOString() })]);
     this.flash = `📌 pinned lines ${sel.lines[0]}–${sel.lines[1]} for Claude · ask it about "this" · Esc unpins`;
   }
 
@@ -1681,7 +1778,7 @@ export default class Md extends View {
       case "escape":
         if (this.anchor !== null) this.anchor = null;
         else if (this.searching) return this.closeSearch(cx);
-        else { this.picked = null; exec("rm", ["-f", `${NOTES()}/selection.json`]); }
+        else { this.picked = null; this.ex("rm", ["-f", `${this.notesDir()}/selection.json`]); }
         return cx.notify();
       case "#": this.numbers = nextNumberMode(this.numbers); this.flash = `line numbers: ${this.numbers}`; return cx.notify();
       case "C": this.look = nextLook(this.look); this.flash = `cursor: ${LOOK_NAMES[this.look]} · C next look · B motion`; this.saveCursor(); return cx.notify();
@@ -1755,17 +1852,18 @@ export default class Md extends View {
       .child(h_flex().gap(10).items_center().text_size(SIZE.body).text_color(t.muted)
         .child(div().child("Find a markdown file")).child(div().text_color(t.dim).child("·")).child(chip("ctrl-p")))
       .child(h_flex().gap(6).items_center().text_size(12).text_color(t.dim)
-        .when(Boolean(this.pickRoot), el => el.child(div().child(`in ${this.pickRoot.replace(home(), "~")}`)).child(div().child("·")))
+        .when(Boolean(this.pickRoot), el => el.child(div().child(`in ${this.pickRoot.replace(this.homeDir(), "~")}`)).child(div().child("·")))
         .child(chip("q")).child(div().child("close")));
   }
 
   // Top: where you are. The file (home shortened), and a crumb back after a link.
   headerBar(t) {
-    const path = (this.file ?? "").replace(home(), "~"), name = path.split("/").pop(), dir = path.slice(0, path.length - name.length);
+    const path = (this.file ?? "").replace(this.homeDir(), "~"), name = path.split("/").pop(), dir = path.slice(0, path.length - name.length);
     const prev = this.history.length ? this.history[this.history.length - 1].file.split("/").pop() : null;
     return h_flex().h(30).flex_none().px(14).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
       .when(Boolean(prev), el => el.child(div().id("md-back").px(6).rounded(4).cursor_pointer().text_color(t.accent).hover(s => s.bg(t.hover))
         .on_click((_e, cx) => this.back(cx)).child(`← ${prev}`)))
+      .when(Boolean(this.on), el => el.child(div().flex_none().px(6).rounded(4).bg(t.accent + "26").text_color(t.accent).child(this.on)))
       .child(h_flex().flex_1().min_w(0).items_center().child(div().truncate().text_color(t.dim).child(dir)).child(div().flex_none().text_color(t.foreground).font_semibold().child(name)))
       .when(this.changed.size > 0, el => el.child(div().px(8).rounded(4).bg(t.ansi2 + "22").text_color(t.ansi2).child(`${this.changed.size} changed`)));
   }
