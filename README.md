@@ -164,17 +164,22 @@ herdr-app do layout.clone '{"name":"main","as":"my-main"}'
 ```
 
 In `layouts/my-main.json` set the `files` block's `content.mod` to `my-files`.
-In `mods/my-files/main.js` add `run` to the `herdr` import and put this at the
-top of `show(path, cx)`:
+In `mods/my-files/main.js` add `run` and `setShared` to the `herdr` import and
+put this at the top of `show(path, cx)`:
 
 ```js
 if (path && cx && !this.on && /\.(md|markdown|mdx)$/i.test(path)) {
   const file = `${this.root}/${path}`, tab = focused()?.tab;
-  const old = panes().find(p => p.mod === "herdr-md" && p.tab === tab);
-  if (old) run("pane.close", { pane: old.pane });   // close first, or each click halves the pane
-  return run("pane.split", { direction: "right", mod: "herdr-md", props: { file } });
+  const viewers = panes().filter(p => p.mod === "herdr-md" && p.tab === tab);
+  if (viewers.length !== 1) return run("pane.split", { direction: "right", mod: "herdr-md", props: { file } });
+  setShared("herdr-md.open", { file });   // the open viewer shows it in place
+  return run("herdr-md.open");
 }
 ```
+
+`herdr-md.open` works from any mod: set `herdr-md.open` in shared state to
+`{ file }` first. When the shown tab has one local viewer, it opens the file in
+place, and `Backspace` goes back to the one before.
 
 ## For agents: `mdh`
 
@@ -223,7 +228,7 @@ heading, list item, table row, code block). For Claude Code there's a ready skil
 | `?` or `h` | key help: `/` searches it (`Enter` back to scrolling, `Esc` clears); `j` `k`, `ctrl-d` `ctrl-u`, `g` `G` or the wheel scroll it; any other key closes it |
 | `q` | close the viewer |
 
-Clicking a heading folds it too.
+Clicking a heading's arrow folds it too.
 
 ## Development
 
