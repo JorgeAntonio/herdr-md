@@ -17,7 +17,7 @@ import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, InputState, Input } from "gpui-base";
 import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, spaces, focused, run, shared } from "herdr";
 import { marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX } from "./lex.js";
-import { inlineMath, splitInline } from "./tex.js";
+import { inlineMath, splitInline, texToUnicode } from "./tex.js";
 import { hash as bhash, diffBlocks, slug, labelOf, inlineRoles, alertOf, ALERTS, nextNumberMode, ordinals, gutterLabel, nextLook, nextMotion, parseCursorPref, cursorParts, LOOK_NAMES } from "./doc.js";
 import { listFiles, parseRecent, pushRecent, rank, runs, previewSource, parseConfig, layoutOf, sizeOf, within, shape, shorten } from "./picker.js";
 import { VIDEO_FPS, stopped, command, tick } from "./video.js";
@@ -1182,8 +1182,11 @@ export default class Md extends View {
     const avail = this.colW - 2;
     if (tok.widths?.avail === avail) return tok.widths.weight;
     const ch = SIZE.body * 0.62, padX = 24 + 6, all = c => [tok.header[c], ...tok.rows.map(r => r[c])];
-    const cols = tok.header.map((_h, c) => all(c).map(x => plain(x?.tokens) || x?.text || ""));
-    const words = tok.header.map((_h, c) => all(c).map(x => solid(x?.tokens) || x?.text || ""));
+    // A formula is as wide as what it draws, not its TeX source, and never wraps inside.
+    const shown = x => splitInline(x?.text ?? "").map(q => q.tex === undefined ? plainNote(q.text) : texToUnicode(q.tex).replace(/\s/g, "\u00a0")).join("");
+    const hasMath = x => /\$/.test(x?.text ?? "");
+    const cols = tok.header.map((_h, c) => all(c).map(x => hasMath(x) ? shown(x) : plain(x?.tokens) || x?.text || ""));
+    const words = tok.header.map((_h, c) => all(c).map(x => hasMath(x) ? shown(x) : solid(x?.tokens) || x?.text || ""));
     const min = words.map(xs => padX + ch * Math.max(1, ...xs.flatMap(s => s.split(/\s+/).map(w => [...w].length))));
     const max = cols.map((xs, c) => Math.max(min[c], padX + ch * Math.max(...xs.map(s => [...s.trim()].length))));
     const sum = a => a.reduce((x, y) => x + y, 0);
