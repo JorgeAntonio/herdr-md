@@ -30,3 +30,19 @@ test("text splits around each inline formula", () => {
 test("double-dollar prices stay text", () => {
   assert.equal(inlineMath("cost $$5 and $$10"), "cost $$5 and $$10");
 });
+
+test("separate code spans inside dollar signs stay as code", () => {
+  const md = "($`x` `y`$)";
+  assert.equal(inlineMath(md), md);
+  assert.deepEqual(splitInline(md), [{ text: md }]);
+});
+
+test("protected math uses the first backtick run of the opening length", () => {
+  const md = "($``x` + y``$)";
+  assert.equal(inlineMath(md), "(*x` + y*)");
+  assert.deepEqual(splitInline(md), [{ text: "(" }, { tex: "x` + y" }, { text: ")" }]);
+});
+
+test("an unfinished protected delimiter leaves a later formula intact", () => {
+  assert.equal(inlineMath("Unfinished $`x` and $y$."), "Unfinished $`x` and *y*.");
+});

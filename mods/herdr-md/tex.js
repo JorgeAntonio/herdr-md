@@ -62,13 +62,12 @@ export function inlineMath(md) {
   try { return replaceInline(md); } catch { return md; }   // never let a bad formula break the view
 }
 
-// GitHub's protected $`…`$ and inline $$…$$ are math too; they go first so the
-// plain rule never sees their dollars.
-const INLINE_MATH = /(^|[^\\$])(?:\$`([^`\n]+)`\$|\$\$([^$\n]+?)\$\$(?!\d)|\$(?!\s)([^$\n]+?)(?<!\s)\$(?!\d))/g;
+// The first backtick run of the opening length ends the code span.
+const INLINE_MATH = /(^|[^\\$])(?:\$(`+)(?!`)((?:[^`\r\n]|(?!\2(?!`))`+(?!`))+)\2\$|\$\$([^$\n]+?)\$\$(?!\d)|\$(?![\s`])([^$\n]+?)(?<!\s)\$(?!\d))/g;
 
 function replaceInline(md) {
   return md.replace(INLINE_MATH,
-    (_, pre, quoted, double, plain) => `${pre}*${texToUnicode(quoted ?? double ?? plain).replace(/[*_]/g, "\\$&")}*`);
+    (_, pre, _ticks, quoted, double, plain) => `${pre}*${texToUnicode(quoted ?? double ?? plain).replace(/[*_]/g, "\\$&")}*`);
 }
 
 // The markdown split around its inline formulas: [{ text } | { tex }], in order.
@@ -77,7 +76,7 @@ export function splitInline(md) {
   for (const m of md.matchAll(INLINE_MATH)) {
     const start = m.index + m[1].length;
     if (start > at) parts.push({ text: md.slice(at, start) });
-    parts.push({ tex: m[2] ?? m[3] ?? m[4] });
+    parts.push({ tex: m[3] ?? m[4] ?? m[5] });
     at = m.index + m[0].length;
   }
   if (at < md.length) parts.push({ text: md.slice(at) });
