@@ -55,7 +55,7 @@ const HELP = [[
 ], [
   ["READ", [["ctrl-p", "find a markdown file, with preview (ctrl-f: folders, ctrl-g: up a folder)"], ["o", "outline"], ["Enter", "fold a heading, follow a link, zoom a figure, play a video"], ["O", "open a video in QuickTime"], ["Backspace", "back after a link"],
     ["za zc zo", "toggle / close / open fold"], ["zM zR", "fold / unfold all"], ["] [", "next / previous change"], ["c", "clear change marks"],
-    ["/", "search"], ["n N", "next / previous match or note"], ["#", "line numbers: absolute, relative, off"],
+    ["/", "search"], ["n N", "next / previous match or note"], ["#", "line numbers: absolute, relative, off (remembered)"],
     ["C", "cursor look: highlight, number badge, lift"], ["B", "cursor motion: blink (default), steady, pulse, grow"]]],
   ["ZOOM (Enter on a diagram or image)", [["h j k l", "pan (or drag, or scroll)"], ["+ -", "zoom in / out (or ctrl-scroll)"], ["0", "fit"], ["Esc", "close"]]],
   ["VIEWER", [["? h", "this help"], ["q", "close the viewer"]]],
@@ -201,7 +201,7 @@ export default class Md extends View {
     const p = props(), explicit = p && "machine" in p ? p.machine : undefined;
     this.ready = this.locate(machineCandidates({ explicit, focusedTab: focused()?.tab, spaces: spaces(), panes: panes(), mod: MOD }));
     this.remember(this.file);
-    readTextFile(CURSOR_PREF()).catch(() => null).then(text => { const p = parseCursorPref(text); this.look = p.look; this.cmotion = p.motion; cx.notify(); });
+    readTextFile(CURSOR_PREF()).catch(() => null).then(text => { const p = parseCursorPref(text); this.look = p.look; this.cmotion = p.motion; this.numbers = p.numbers; cx.notify(); });
     this.load(cx);
     this.watch(cx);
     this.watchNotes(cx);
@@ -1904,7 +1904,7 @@ export default class Md extends View {
   }
 
   saveCursor() {
-    exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.cursor.$$" && mv -f "$1/.cursor.$$" "$1/cursor.json"', "cursor", NOTES(), JSON.stringify({ look: this.look, motion: this.cmotion })]);
+    exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.cursor.$$" && mv -f "$1/.cursor.$$" "$1/cursor.json"', "cursor", NOTES(), JSON.stringify({ look: this.look, motion: this.cmotion, numbers: this.numbers })]);
   }
 
   yank() { const { text } = this.selection(); exec("sh", ["-c", 'printf %s "$1" | LANG=en_US.UTF-8 pbcopy', "yank", text]); this.flash = "copied"; }
@@ -1997,7 +1997,7 @@ export default class Md extends View {
         else if (this.searching) return this.closeSearch(cx);
         else { this.picked = null; const nd = this.notesDir(); if (nd) this.ex("rm", ["-f", `${nd}/selection.json`]).catch(() => {}); }
         return cx.notify();
-      case "#": this.numbers = nextNumberMode(this.numbers); this.flash = `line numbers: ${this.numbers}`; return cx.notify();
+      case "#": this.numbers = nextNumberMode(this.numbers); this.flash = `line numbers: ${this.numbers}`; this.saveCursor(); return cx.notify();
       case "C": this.look = nextLook(this.look); this.flash = `cursor: ${LOOK_NAMES[this.look]} · C next look · B motion`; this.saveCursor(); return cx.notify();
       case "B": this.cmotion = nextMotion(this.cmotion); this.flash = `cursor motion: ${this.cmotion} · B next · C look`; this.resting = true; this.saveCursor(); return cx.notify();
       case "O": return this.openVideo(cx);

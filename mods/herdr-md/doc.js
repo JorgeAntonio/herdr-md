@@ -117,6 +117,7 @@ export function parseCursorPref(text) {
   return {
     look: CURSOR_LOOKS.includes(p?.look) ? p.look : "highlight",
     motion: CURSOR_MOTIONS.includes(p?.motion) ? p.motion : "blink number",
+    numbers: NUMBER_MODES.includes(p?.numbers) ? p.numbers : "absolute",
   };
 }
 
