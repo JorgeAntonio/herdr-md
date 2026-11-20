@@ -1933,8 +1933,11 @@ export default class Md extends View {
       return;
     }
     const mod = e.modifiers ?? {};
-    if (mod.platform || mod.alt) return;
-    const k = mod.shift && e.key.length === 1 ? (e.key_char ?? e.key.toUpperCase()) : e.key;
+    // Option types a character on many layouts (# is Option-3 on a UK or German Mac):
+    // that character is the key; any other Option chord stays the app's.
+    const typed = mod.alt && !mod.platform && !mod.control && e.key_char?.length === 1 ? e.key_char : null;
+    if (mod.platform || (mod.alt && !typed)) return;
+    const k = typed ?? (mod.shift && e.key.length === 1 ? (e.key_char ?? e.key.toUpperCase()) : e.key);
     if (this.help) { if (!MODIFIER_KEYS.includes(e.key)) this.helpKeys(k, mod, cx); return cx.stop_propagation(); }
     if (this.zoom) return this.zoomKeys(k, mod, cx);
     const half = Math.max(80, this.viewH / 2), page = Math.max(100, this.viewH - 80);
