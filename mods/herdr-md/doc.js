@@ -56,6 +56,13 @@ export function inlineRoles(md, labels) {
   });
 }
 
+export function footnoteBackId(url) {
+  const prefix = "#fnback:";
+  if (!url.startsWith(prefix)) return null;
+  try { return decodeURIComponent(url.slice(prefix.length)); }
+  catch { return null; }
+}
+
 const SUPERSCRIPT = "⁰¹²³⁴⁵⁶⁷⁸⁹";
 const superscript = n => String(n).replace(/\d/g, d => SUPERSCRIPT[d]);
 

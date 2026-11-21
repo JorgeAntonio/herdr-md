@@ -3,7 +3,7 @@
 // become links the viewer follows.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inlineRoles } from "../mods/herdr-md/doc.js";
+import { footnoteBackId, inlineRoles } from "../mods/herdr-md/doc.js";
 
 test("a footnote reference links to its definition by number", () => {
   const labels = new Map([["^1", { block: 40, num: 1 }], ["^bergomi", { block: 41, num: 12 }]]);
@@ -17,4 +17,10 @@ test("an undefined footnote and a definition marker stay as written", () => {
 
 test("a reference inside a code span stays as written", () => {
   assert.equal(inlineRoles("see `a [^1]` and x [^1]", new Map([["^1", { block: 3, num: 1 }]])), "see `a [^1]` and x[¹](#label:%5E1)");
+});
+
+test("malformed footnote backlink escapes are ignored", () => {
+  assert.equal(footnoteBackId("#fnback:%5E1"), "^1");
+  assert.equal(footnoteBackId("#fnback:%"), null);
+  assert.equal(footnoteBackId("#other:%"), null);
 });

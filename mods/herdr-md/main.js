@@ -18,7 +18,8 @@ import { v_flex, h_flex, Editor, EditorState, TextView, InputState, Input } from
 import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, spaces, focused, run, shared } from "herdr";
 import { marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX } from "./lex.js";
 import { inlineMath, splitInline, texToUnicode } from "./tex.js";
-import { hash as bhash, diffBlocks, slug, labelOf, inlineRoles, alertOf, ALERTS, nextNumberMode, ordinals, gutterLabel, nextLook, nextMotion, parseCursorPref, cursorParts, LOOK_NAMES } from "./doc.js";
+import { hash as bhash, diffBlocks, slug, labelOf, inlineRoles, footnoteBackId, alertOf, ALERTS, nextNumberMode, ordinals, gutterLabel, nextLook, nextMotion, parseCursorPref, cursorParts, LOOK_NAMES } from "./doc.js";
+import { cacheFlow } from "./flow-cache.js";
 import { listFiles, parseRecent, pushRecent, rank, runs, previewSource, parseConfig, layoutOf, sizeOf, within, shape, shorten } from "./picker.js";
 import { VIDEO_FPS, stopped, command, tick } from "./video.js";
 import { machineCandidates, STAT_SH, parseStats, CHUNK, CHUNK_SH, slices } from "./remote.js";
@@ -462,7 +463,10 @@ export default class Md extends View {
   }
 
   follow(url, cx) {
-    if (url.startsWith("#fnback:")) return this.footnoteBack(decodeURIComponent(url.slice(8)), cx);
+    if (url.startsWith("#fnback:")) {
+      const id = footnoteBackId(url);
+      return id === null ? cx.notify() : this.footnoteBack(id, cx);
+    }
     if (url.startsWith("#")) {
       this.history.push({ file: this.file, cursor: this.cursor });
       this.jumpAnchor(url.slice(1)); return cx.notify();
@@ -1018,7 +1022,7 @@ export default class Md extends View {
         atoms.push(fig ? { fig: Number(fig[1]), style } : { word: piece, style });
       }
     };
-    if (!atoms) { atoms = []; walk(marked.Lexer.lexInline(src), {}); this.flows.set(src, atoms); }
+    atoms = cacheFlow(this.flows, src, () => { atoms = []; walk(marked.Lexer.lexInline(src), {}); return atoms; });
     // A line may break only where the source has a space: pieces that touch
     // (a formula and its comma, code and a semicolon) stay together.
     const units = [[]];
