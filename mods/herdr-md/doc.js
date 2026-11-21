@@ -40,7 +40,14 @@ export function labelOf(tok) {
 }
 
 // Inline roles → markdown links the viewer handles (#label:name), or plain text.
+// A footnote reference [^id] becomes a superscript link to its definition, which
+// index() files under the label "^id".
 export function inlineRoles(md, labels) {
+  // The reference hugs the word before it, as a superscript does. Code spans keep theirs as written.
+  md = md.replace(/(`+)[\s\S]*?\1|[^\S\n]*\[\^([^\]\s]+)\](?!:)/g, (ref, code, id) => {
+    const l = code ? null : labels.get(`^${id}`);
+    return l ? `[${superscript(l.num)}](#label:${encodeURIComponent(`^${id}`)})` : ref;
+  });
   return md.replace(/:(eqref|numref|ref|cite|citet|citep):`([^`]+)`/g, (_, role, name) => {
     if (role.startsWith("cit")) return `[${name}]`;
     const l = labels.get(name);
@@ -48,6 +55,16 @@ export function inlineRoles(md, labels) {
     return `[${text}](#label:${encodeURIComponent(name)})`;
   });
 }
+
+export function footnoteBackId(url) {
+  const prefix = "#fnback:";
+  if (!url.startsWith(prefix)) return null;
+  try { return decodeURIComponent(url.slice(prefix.length)); }
+  catch { return null; }
+}
+
+const SUPERSCRIPT = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+const superscript = n => String(n).replace(/\d/g, d => SUPERSCRIPT[d]);
 
 // GitHub alerts: a blockquote whose first line is [!NOTE] / [!TIP] / [!IMPORTANT] / [!WARNING] / [!CAUTION].
 export const ALERTS = {
@@ -107,6 +124,7 @@ export function parseCursorPref(text) {
   return {
     look: CURSOR_LOOKS.includes(p?.look) ? p.look : "highlight",
     motion: CURSOR_MOTIONS.includes(p?.motion) ? p.motion : "blink number",
+    numbers: NUMBER_MODES.includes(p?.numbers) ? p.numbers : "absolute",
   };
 }
 
