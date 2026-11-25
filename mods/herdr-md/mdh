@@ -21,7 +21,7 @@
 The viewer watches ~/.cache/herdr-md/ and redraws and scrolls when a file there changes.
 Anywhere in Herdr: cmd-shift-o opens a viewer straight into the picker (a keys.json binding, see README).
 Viewer keys: ctrl-p find a file (fuzzy, with preview), j/k move the cursor, V visual select, y copy, p pin for Claude, Enter fold/follow/zoom/play,
-O open a video in QuickTime, za fold, / search, n/N next match or highlight, # line numbers, ? key help, q close.
+O open a video in a player, za fold, / search, n/N next match or highlight, # line numbers, ? key help, q close.
 """
 import argparse, json, os, re, subprocess, sys, time
 

@@ -4,8 +4,8 @@ Finally, markdown and the terminal done right: a native markdown pane for the
 [Herdr](https://herdr.dev) desktop app, drawn in your theme next to your shell.
 
 > [!IMPORTANT]
-> herdr-md is a mod for the **Herdr desktop app** (the native macOS window). It
-> doesn't run in `herdr`, the terminal app and CLI.
+> herdr-md is a mod for the **Herdr desktop app** (the native window, on macOS and
+> Linux). It doesn't run in `herdr`, the terminal app and CLI.
 
 https://github.com/user-attachments/assets/0da11259-cf8d-490e-943c-72fb9807540d
 
@@ -48,14 +48,49 @@ cp -R herdr-md/mods/herdr-md ~/.config/herdr-app/mods/
 ln -s ~/.config/herdr-app/mods/herdr-md/mdh ~/.local/bin/mdh   # the CLI for agents
 ```
 
-**Needs:** Herdr desktop app. For math and Mermaid, Node.js with npm (the mod
+**Needs:** Herdr desktop app on macOS or Linux. For math and Mermaid, Node.js with npm (the mod
 runs `npm install` in its `render/` folder the first time it meets a formula or
 diagram, about 400 MB with Mermaid's tooling) and, for Mermaid only, an
 installed Chrome, Chromium, Brave or Edge (none is downloaded; set
 `CHROME_PATH` if yours is elsewhere). Without them everything else works and
 figures show their source. Videos need `ffmpeg` (Homebrew's is found).
-Built and tested on macOS; image sizing (`sips`) and
-copy (`pbcopy`) are macOS tools.
+Built on macOS; see [Linux](#linux) for what it uses there.
+
+The first `npm install` can take longer than the 30 s Herdr gives a mod's command.
+If figures say `took longer than 30 s`, wait for the install to finish and reopen
+the document, or run it yourself:
+
+```sh
+cd ~/.config/herdr-app/mods/herdr-md/render && PUPPETEER_SKIP_DOWNLOAD=1 npm install
+```
+
+### Linux
+
+The viewer asks Herdr which system it runs on and picks the tool itself. There is
+nothing to configure.
+
+| What | macOS | Linux |
+|---|---|---|
+| Copy (`y`, the `copy` button) | `pbcopy` | the app's own clipboard |
+| Web links | `open` | the app opens them |
+| Mail links | `open` | `xdg-open` |
+| A link to a local non-markdown file | shown in Finder | its folder opens (`xdg-open`); the file is never opened |
+| Image size | `sips` | `file` (and `ffprobe` for lossless WebP) |
+| `O` on a video | QuickTime Player | `mpv` |
+| Video cache | BSD `stat` | GNU `stat` |
+
+Install `file`, `xdg-utils` and `util-linux` (`setsid`), which most desktops
+already have; `ffmpeg` and `mpv` for videos; `nodejs` and `npm` for math and
+Mermaid, plus Chromium, Chrome, Brave or Edge for Mermaid (set `CHROME_PATH` if
+yours is elsewhere). On Arch:
+
+```sh
+sudo pacman -S --needed file xdg-utils util-linux ffmpeg mpv nodejs npm chromium
+```
+
+`mpv` runs with the same guard `ffmpeg` has: only the container `ffprobe`
+verified, the file protocol only, and no user config, scripts or youtube-dl. SVG
+images whose size `file` can't tell are drawn in an 800×450 box.
 
 **Remote machines:** a viewer in a space on another machine (`hc machine`) reads that
 machine's files: the tab it opened from names the machine (a badge in the header), or
@@ -64,7 +99,8 @@ on that machine where Herdr is the window showing it. Herdr can't watch a remote
 folder, so the viewer polls every 1.5 s. Images and videos are copied over (images up
 to 20 MB, videos up to 32 MB) into `.cache/`.
 
-**What it runs:** `node`/`npm` (renderers), `ffmpeg`/`ffprobe` (video frames), `cp`, `mkdir`, `sips`, `pbcopy`. It
+**What it runs:** `node`/`npm` (renderers), `ffmpeg`/`ffprobe` (video frames), `cp`, `mkdir`, and the
+system tools above (macOS: `open`, `sips`, `pbcopy`, `stat`; Linux: `xdg-open`, `setsid`, `file`, `mpv`, `stat`). It
 reads the file you open and the images it links, writes only inside its own
 folder (`.cache/`) and `~/.cache/herdr-md/` (highlights and your selection),
 and fetches nothing from the network except that one-time `npm install`.
@@ -76,7 +112,7 @@ as JPEG frames cached in `.cache/v/`, extracted on first play (only a poster
 frame on open). Only real MP4/QuickTime or WebM files are decoded: ffmpeg runs
 with the file protocol only and the container forced, so a playlist named
 `.mp4` is refused. Enter plays it, `O` hands the file to
-QuickTime Player. See [`demo/media.md`](demo/media.md).
+QuickTime Player (macOS) or `mpv` (Linux). See [`demo/media.md`](demo/media.md).
 
 Try it on the bundled tour: `mdh open demo/tour.md`.
 
@@ -107,6 +143,9 @@ To do the same from anywhere in Herdr with `cmd-shift-o`, add this to the
   "args": { "direction": "right", "mod": "herdr-md", "props": { "pick": true } }
 }
 ```
+
+On Linux `cmd` means the Super key, which window managers often keep for
+themselves: bind another chord, such as `ctrl-alt-o`.
 
 The key can't use `herdr-md.pick`: a mod command only reaches a viewer that
 is already showing, so with none open it does nothing. With no shell to ask,
@@ -212,13 +251,13 @@ heading, list item, table row, code block). For Claude Code there's a ready skil
 | `]` `[` · `c` | next / previous changed block · clear the change marks |
 | `o` | outline (`j`/`k`, `Enter`, `Esc`) |
 | `ctrl-p` | find a markdown file: type to fuzzy-filter, `ctrl-n` `ctrl-p` (or `ctrl-j` `ctrl-k`, arrows) move, `Enter` opens here (`Backspace` comes back), `ctrl-v` opens a split, `ctrl-d` `ctrl-u` scroll the preview, `ctrl-f` switches files ⇄ folders (`Enter` on a folder moves into it), `ctrl-g` or `Backspace` on an empty prompt goes up a folder, `Esc` closes. Lists the git work tree's `.md`/`.markdown` files (tracked and untracked, not ignored), else the folder 4 levels deep; at most 5000; recently opened first. Layout and listing are set in [`picker.json`](#set-up-the-picker) |
-| `Backspace` | back after following a link (web links open in your browser; local non-markdown files are only shown in Finder, never launched) |
+| `Backspace` | back after following a link (web links open in your browser; local non-markdown files are only shown in Finder, or their folder opened on Linux, never launched) |
 | `zz` · `za` `zc` `zo` · `zM` `zR` | center · toggle/close/open fold · fold/unfold all |
 | `V` then `j`/`k` | select blocks |
 | `y` | copy the selection's markdown source (table rows bring their header along) |
 | `p` | pin the selection for the agent (`mdh sel` reads it) |
 | `Enter` | fold the heading, follow the first link in the block, zoom a diagram or image, or play/pause a video |
-| `O` | open the video under the cursor in QuickTime Player |
+| `O` | open the video under the cursor in QuickTime Player (macOS) or `mpv` (Linux) |
 | in a zoomed figure: `h` `j` `k` `l` or drag or scroll · `+` `-` or ctrl-scroll · `0` · `Esc` | pan · zoom (about the pointer) · fit · close |
 | `/` then `Enter` / `Shift-Enter`, `n` `N` | search; next / previous match (or highlight) |
 | `#` | line numbers: absolute → relative (vim hybrid: the cursor shows its line, the rest how many `j`/`k` away) → off; remembered for every viewer |

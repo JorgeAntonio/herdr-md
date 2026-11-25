@@ -15,7 +15,7 @@
 // videos are copied here (base64 over exec) because the app only draws local files.
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, InputState, Input } from "gpui-base";
-import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, spaces, focused, run, shared } from "herdr";
+import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, spaces, focused, run, shared, window } from "herdr";
 import { marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX } from "./lex.js";
 import { inlineMath, splitInline, texToUnicode } from "./tex.js";
 import { hash as bhash, diffBlocks, slug, labelOf, inlineRoles, footnoteBackId, alertOf, ALERTS, nextNumberMode, ordinals, gutterLabel, nextLook, nextMotion, parseCursorPref, cursorParts, LOOK_NAMES } from "./doc.js";
@@ -23,6 +23,7 @@ import { cacheFlow } from "./flow-cache.js";
 import { listFiles, parseRecent, pushRecent, rank, runs, previewSource, parseConfig, layoutOf, sizeOf, within, shape, shorten } from "./picker.js";
 import { VIDEO_FPS, stopped, command, tick } from "./video.js";
 import { machineCandidates, STAT_SH, parseStats, CHUNK, CHUNK_SH, slices } from "./remote.js";
+import { isMac, openUrlCommand, revealCommand, statCommand, playerCommand, playerName, imageSizeCommands, parseImageSize } from "./platform.js";
 
 // Figures (display math, Mermaid) are rendered by render/render.mjs into
 // .cache/r/<hash>.{svg,png}; the hash covers the source and the colors used.
@@ -54,7 +55,7 @@ const HELP = [[
     ["ctrl-v", "open in a split to the right"], ["ctrl-d ctrl-u", "scroll the preview"], ["Esc", "close"],
     ["cmd-shift-o", "anywhere in Herdr: a new viewer, picker open (keys.json)"]]],
 ], [
-  ["READ", [["ctrl-p", "find a markdown file, with preview (ctrl-f: folders, ctrl-g: up a folder)"], ["o", "outline"], ["Enter", "fold a heading, follow a link, zoom a figure, play a video"], ["O", "open a video in QuickTime"], ["Backspace", "back after a link"],
+  ["READ", [["ctrl-p", "find a markdown file, with preview (ctrl-f: folders, ctrl-g: up a folder)"], ["o", "outline"], ["Enter", "fold a heading, follow a link, zoom a figure, play a video"], ["O", "open a video in QuickTime (macOS) or mpv (Linux)"], ["Backspace", "back after a link"],
     ["za zc zo", "toggle / close / open fold"], ["zM zR", "fold / unfold all"], ["] [", "next / previous change"], ["c", "clear change marks"],
     ["/", "search"], ["n N", "next / previous match or note"], ["#", "line numbers: absolute, relative, off (remembered)"],
     ["C", "cursor look: highlight, number badge, lift"], ["B", "cursor motion: blink (default), steady, pulse, grow"]]],
@@ -144,6 +145,8 @@ const Z = () => Number(settings().zoom) || 1;
 // A note's text without markdown marks, for the typing animation.
 const plainNote = md => md.replace(/\*\*|__|[*_`]/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
 const dirname = p => p.slice(0, p.lastIndexOf("/")) || "/";
+// The app's system (every command below runs on this computer, also for remote files).
+const os = () => window()?.platform ?? "macos";
 const plain = tokens => (tokens ?? []).map(t => t.tokens ? plain(t.tokens) : t.text ?? t.raw ?? "").join("");
 const isComment = tok => tok.type === "html" && /^\s*(<!--[\s\S]*?-->\s*)+$/.test(tok.raw);
 // A cell's text for width estimates: like plain(), but a code span's spaces become
@@ -471,16 +474,41 @@ export default class Md extends View {
       this.history.push({ file: this.file, cursor: this.cursor });
       this.jumpAnchor(url.slice(1)); return cx.notify();
     }
-    // Links come from untrusted documents: never hand `open` anything it could
-    // run. Web and mail links go to the browser or mail app; local non-markdown
-    // files are only revealed in Finder; other schemes are refused.
-    if (/^(https?|mailto):/i.test(url)) { exec("open", [url]); return; }
+    // Links come from untrusted documents: never hand the system opener anything
+    // it could run. Web and mail links go to the browser or mail app; local
+    // non-markdown files are only revealed (Finder, or their folder on Linux);
+    // other schemes are refused.
+    if (/^(https?|mailto):/i.test(url)) { this.openWeb(url, cx); return; }
     if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !url.startsWith("file:")) { this.flash = `not opening ${url.split(":")[0]}: links`; return cx.notify(); }
     const [path, frag = null] = url.replace(/^file:\/\//, "").split("#");
     const abs = path.startsWith("/") ? path : `${dirname(this.file)}/${decodeURIComponent(path)}`.replace(/\/\.\//g, "/");
     if (/\.(md|markdown|mdx)$/i.test(abs)) this.navigate(abs, frag, cx, true);
-    else if (this.on) { this.flash = `${abs.split("/").pop()} is on ${this.on}: can't show it in Finder`; cx.notify(); }
-    else { exec("open", ["-R", abs]); this.flash = "shown in Finder"; cx.notify(); }
+    else if (this.on) { this.flash = `${abs.split("/").pop()} is on ${this.on}: can't show it here`; cx.notify(); }
+    else this.launch(revealCommand(os(), abs, dirname(abs)), isMac(os()) ? "shown in Finder" : "opened its folder", "xdg-utils", cx);
+  }
+
+  openWeb(url, cx) {
+    if (!isMac(os()) && /^https?:/i.test(url)) return cx.open_url(url);
+    this.launch(openUrlCommand(os(), url), null, "xdg-utils", cx);
+  }
+
+  // Start another app, then say `done`. A missing program or a failure shows in
+  // the status line instead; `needs` names what to install.
+  launch([cmd, args], done, needs, cx) {
+    if (done) { this.flash = done; cx.notify(); }
+    cx.spawn(async cx => {
+      const r = await exec(cmd, args).catch(() => null);
+      if (r?.code === 0) return;
+      this.flash = !r || r.code === 127 ? `couldn't open it: install ${needs}` : "couldn't open it";
+      cx.notify();
+    });
+  }
+
+  // The selection or a code block, as text on the clipboard.
+  copy(text, cx) {
+    // pbcopy needs a UTF-8 locale. Elsewhere the app writes the clipboard itself.
+    if (isMac(os())) exec("sh", ["-c", 'printf %s "$1" | LANG=en_US.UTF-8 pbcopy', "copy", text]);
+    else cx.write_to_clipboard(text);
   }
 
   navigate(file, frag, cx, push) {
@@ -716,12 +744,19 @@ export default class Md extends View {
         abs = local;
       } else ok = (await exec("cp", ["-p", abs, local])).code === 0;
       if (!ok) { this.images[href] = { missing: true }; continue; }
-      let w = 800, h = 450;
-      const s = await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", abs]);
-      const mw = s.stdout.match(/pixelWidth: (\d+)/), mh = s.stdout.match(/pixelHeight: (\d+)/);
-      if (mw && mh) { w = +mw[1]; h = +mh[1]; }
+      const { w, h } = await this.imageSize(abs) ?? { w: 800, h: 450 };
       this.images[href] = { path: `${CACHE}/${name}`, w, h };
     }
+  }
+
+  // Pixel size of a local image, or null (the caller keeps its default).
+  async imageSize(abs) {
+    for (const [cmd, args] of imageSizeCommands(os(), abs)) {
+      const r = await exec(cmd, args).catch(() => null);   // not installed: try the next
+      const size = r?.code === 0 ? parseImageSize(os(), r.stdout) : null;
+      if (size) return size;
+    }
+    return null;
   }
 
   // Videos come from untrusted documents, and ffmpeg sniffs content, not the
@@ -757,7 +792,7 @@ export default class Md extends View {
         v.abs = local;
       } else {
         v.abs = src;
-        const st = await exec("stat", ["-f", "%m:%z", v.abs]);
+        const st = await exec(...statCommand(os(), v.abs));
         if (st.code !== 0) { v.missing = true; continue; }
         sig = st.stdout.trim();
       }
@@ -872,7 +907,7 @@ export default class Md extends View {
     const n = this.videoList.indexOf(tok.href);
     return v_flex().my(8).gap(6).items_center()
       .child(div().id(`video-${n}`).cursor_pointer().on_click((_e, cx) => this.videoCmd(n, "toggle", undefined, cx)).child(v.entity))
-      .child(div().text_size(13).text_color(t.dim).italic().child(`${tok.text ? tok.text + " · " : ""}Enter plays · O opens in QuickTime`));
+      .child(div().text_size(13).text_color(t.dim).italic().child(`${tok.text ? tok.text + " · " : ""}Enter plays · O opens in ${playerName(os())}`));
   }
 
   figKey(tok) {
@@ -1128,7 +1163,7 @@ export default class Md extends View {
           .child(h_flex().h(28).px(12).items_center().justify_between().border_b(1).border_color(t.border).text_size(12).text_color(t.dim)
             .child(div().child(tok.lang || "text"))
             .child(div().id(`${id}-copy`).px(8).rounded(4).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
-              .on_click(() => exec("sh", ["-c", 'printf %s "$1" | LANG=en_US.UTF-8 pbcopy', "copy", tok.text])).child("copy")))
+              .on_click((_e, cx) => this.copy(tok.text, cx)).child("copy")))
           .child(div().h(Math.min(lines, 40) * 20 + 4).child(Editor.new(tok.state).size_full()));
       }
       case "blockquote": {
@@ -1315,11 +1350,12 @@ export default class Md extends View {
     return im ? this.videoList.indexOf(im.href) : -1;
   }
 
-  // O: open the clip in QuickTime Player. Only video files reach this, and only
-  // that app is asked to open them, so a document can't launch anything else.
-  // QuickTime sniffs content too (an "x.mp4" HLS playlist makes it fetch URLs),
-  // so only a clip that passed the container check opens, and it is re-probed
-  // first: the cache key is path+mtime+size, which a swapped file can match.
+  // O: open the clip in a video player (QuickTime Player on macOS, mpv on Linux).
+  // Only video files reach this, and only that app is asked to open them, so a
+  // document can't launch anything else. Players sniff content too (an "x.mp4"
+  // HLS playlist makes them fetch URLs), so only a clip that passed the container
+  // check opens, and it is re-probed first: the cache key is path+mtime+size,
+  // which a swapped file can match.
   openVideo(cx) {
     const v = this.videos[this.videoList[this.blockVideo(this.blocks[this.cursor])]];
     if (!v?.abs || v.missing) { this.flash = "O: put the cursor on a video"; return cx.notify(); }
@@ -1327,7 +1363,7 @@ export default class Md extends View {
     cx.spawn(async cx => {
       const probe = await this.probeVideo(v.abs);
       if (probe.error) { v.error = probe.error; this.flash = `O: couldn't prepare: ${probe.error}`; return cx.notify(); }
-      exec("open", ["-a", "QuickTime Player", v.abs]); this.flash = "opened in QuickTime Player"; cx.notify();
+      this.launch(playerCommand(os(), v.abs, probe.fmt), `opened in ${playerName(os())}`, playerName(os()), cx);
     });
   }
 
@@ -1911,7 +1947,7 @@ export default class Md extends View {
     exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/.cursor.$$" && mv -f "$1/.cursor.$$" "$1/cursor.json"', "cursor", NOTES(), JSON.stringify({ look: this.look, motion: this.cmotion, numbers: this.numbers })]);
   }
 
-  yank() { const { text } = this.selection(); exec("sh", ["-c", 'printf %s "$1" | LANG=en_US.UTF-8 pbcopy', "yank", text]); this.flash = "copied"; }
+  yank(cx) { this.copy(this.selection().text, cx); this.flash = "copied"; }
 
   // Pin the selection for Claude: `mdh sel` prints it.
   share() {
@@ -1996,7 +2032,7 @@ export default class Md extends View {
       case "backspace": return this.back(cx);
       case "g": case "z": this.pending = k; return;
       case "V": case "v": this.anchor = this.anchor === null ? this.cursor : null; return cx.notify();
-      case "y": this.yank(); this.anchor = null; return cx.notify();
+      case "y": this.yank(cx); this.anchor = null; return cx.notify();
       case "p": this.share(); this.anchor = null; return cx.notify();
       case "enter": return this.activate(cx);
       case "escape":

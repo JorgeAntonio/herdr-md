@@ -70,6 +70,7 @@ function chrome() {
     "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
     "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+    "/usr/bin/brave", "/usr/bin/brave-browser", "/usr/bin/microsoft-edge",
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   ].find(p => p && fs.existsSync(p));
   if (!found) throw new Error("Mermaid needs Chrome, Chromium, Brave or Edge installed (or set CHROME_PATH)");

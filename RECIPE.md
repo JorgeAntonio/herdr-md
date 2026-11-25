@@ -32,7 +32,7 @@ on the person's PATH, since opening files and every agent feature go through it:
 - Reloads when the file changes (`watchFolder` on its folder); highlights reapply.
 - Highlights come from `~/.cache/herdr-md/<path-key>.json` (`{seq, focus, highlights: [{lines:[a,b]} | {text}, note?, color?]}`), written by the bundled `mdh` script and watched by the pane. A new `seq` glides to the focused highlight, unfolding sections that hide it.
 - Scrolling is the mod's own viewport: content is absolutely positioned at `top(-offset)` with `.transition("top", …)`: 320ms ease-in-out for jumps (highlights, search, headings, gg/G), 120ms for cursor steps, 60ms for wheel ticks, 200ms for half pages.
-- Keys (with `"focusable": true`): `j/k` (counts), `gg/G`, `ctrl-d/u/f/b`, `space`, `{ }`/`[ ]`, `zz`, `za/zc/zo/zM/zR`, `V`, `y` (copy source via `pbcopy`), `p` (pin: write `~/.cache/herdr-md/selection.json`), `Enter` (fold a heading or follow its first link), `/` search with `Enter`/`Shift-Enter`, `n/N`, `#`, `C`, `B`, `Esc`. A click puts the cursor on that block; clicking a heading folds it.
+- Keys (with `"focusable": true`): `j/k` (counts), `gg/G`, `ctrl-d/u/f/b`, `space`, `{ }`/`[ ]`, `zz`, `za/zc/zo/zM/zR`, `V`, `y` (copy source: `pbcopy` on macOS, `cx.write_to_clipboard` elsewhere), `p` (pin: write `~/.cache/herdr-md/selection.json`), `Enter` (fold a heading or follow its first link), `/` search with `Enter`/`Shift-Enter`, `n/N`, `#`, `C`, `B`, `Esc`. A click puts the cursor on that block; clicking a heading folds it.
 - Figures render in one batch per load through `node render/render.mjs '<jobs JSON>'`; the first time, the mod runs `npm install` there. Outputs are cached by a hash of source and colors, so a theme change re-renders once.
 
 ## Built from
@@ -41,11 +41,15 @@ on the person's PATH, since opening files and every agent feature go through it:
 - `tex.js`: inline TeX → Unicode (Greek, operators, super/subscripts, `\frac`, accents) and the inline `$…$` rule (no space inside the dollars, no digit after, so prices stay text).
 - Paragraph and cell text: `TextView.markdown` (inherits size and font, ignores parent color). Headings are plain text so they can be colored.
 - `render/render.mjs`: MathJax (`mathjax-full`, liteAdaptor, SVG output, `currentColor` → theme foreground) and `@mermaid-js/mermaid-cli`'s `renderMermaid` on one puppeteer browser using the installed Chrome-family app, PNG at 2× with transparent background and theme variables.
+- `platform.js`: every command that differs between macOS and Linux (`window().platform`): opening links, revealing files, image size, `stat`, the video player. No Herdr imports, so `test/platform.test.mjs` runs it under Node.
 - `mdh` (Python 3): `open`, `hl`, `focus`, `clear`, `show`, `sel`.
-- `herdr` APIs: `props`, `readTextFile`, `watchFolder`, `exec`, `theme`, `settings`, `home`, `nextCommand`, `panes`. Programs: `node`, `npm`, `cp`, `mkdir`, `sips`, `pbcopy`.
+- `herdr` APIs: `props`, `readTextFile`, `watchFolder`, `exec`, `theme`, `settings`, `home`, `nextCommand`, `panes`, `window`. Programs: `node`, `npm`, `cp`, `mkdir`; on macOS `open`, `sips`, `pbcopy`, `stat`; on Linux `xdg-open`, `setsid`, `file`, `ffprobe`, `mpv`, `stat`.
 
 ## Watch out
 
+- BSD and GNU `stat` share no format flag, and `sips`, `pbcopy` and `open` don't exist on Linux; `exec` rejects for a missing program, so catch it. A detached opener must drop its output or `exec` waits on its pipes.
+- `cx.open_url` takes http and https only: `mailto:` goes through `xdg-open`.
+- Media players sniff content like `ffmpeg` does: force the verified container and allow only the file protocol.
 - `EditorState.new` throws inside `render`: build code-block states at load.
 - `image()` only loads files under the Herdr home: local images are copied to `.cache/` first.
 - Sizes from `on_size_change` and wheel deltas are zoomed pixels while `top()`/`h()` take zoom-1 units: divide by `settings().zoom`.
